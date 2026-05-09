@@ -1,0 +1,1434 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowUp,
+  Check,
+  Circle,
+  Clock3,
+  FileText,
+  Filter,
+  GripVertical,
+  Lightbulb,
+  ListPlus,
+  Lock,
+  LogOut,
+  MessageSquare,
+  Pencil,
+  Plus,
+  Redo2,
+  Search,
+  Send,
+  Settings,
+  ShieldCheck,
+  Trash2,
+  Undo2,
+  Users,
+  X
+} from 'lucide-react';
+import './styles.css';
+
+const STORAGE_KEY = 'unidades-state';
+const SESSION_KEY = 'unidades-session';
+const COLORS = ['#69b578', '#e0a458', '#5d8aa8', '#d96570', '#7b6bb7'];
+const UNITS = [
+  { id: 'jaguapita', name: 'Jaguapitã', password: 'jaguapita', accent: '#69b578' },
+  { id: 'palmeiras', name: 'Palmeiras', password: 'palmeiras', accent: '#e0a458' },
+  { id: 'ipuacu', name: 'Ipuaçu', password: 'ipuacu', accent: '#5d8aa8' },
+  { id: 'arapongas', name: 'Arapongas', password: 'arapongas', accent: '#d96570' },
+  { id: 'rondon', name: 'Rondon', password: 'rondon', accent: '#7b6bb7' }
+];
+
+function emptyUnit(unit) {
+  return {
+    id: unit.id,
+    name: unit.name,
+    documents: [],
+    activity: []
+  };
+}
+
+function createDefaultState() {
+  return {
+    version: 1,
+    updatedAt: isoNow(),
+    settings: {
+      adminUser: 'rosa',
+      adminPassword: 'gass'
+    },
+    units: Object.fromEntries(UNITS.map((unit) => [unit.id, emptyUnit(unit)])),
+    messages: []
+  };
+}
+
+function normalizeState(input) {
+  const state = input && typeof input === 'object' ? input : createDefaultState();
+  const fallback = createDefaultState();
+  return {
+    ...fallback,
+    ...state,
+    settings: { ...fallback.settings, ...(state.settings || {}) },
+    units: Object.fromEntries(
+      UNITS.map((unit) => [
+        unit.id,
+        {
+          ...emptyUnit(unit),
+          ...(state.units?.[unit.id] || {}),
+          name: unit.name,
+          documents: Array.isArray(state.units?.[unit.id]?.documents) ? state.units[unit.id].documents : [],
+          activity: Array.isArray(state.units?.[unit.id]?.activity) ? state.units[unit.id].activity : []
+        }
+      ])
+    ),
+    messages: Array.isArray(state.messages) ? state.messages : []
+  };
+}
+
+function hasAppsScriptBridge() {
+  return Boolean(window.google?.script?.run);
+}
+
+function runAppsScript(functionName, ...args) {
+  return new Promise((resolve, reject) => {
+    const runner = window.google.script.run
+      .withSuccessHandler(resolve)
+      .withFailureHandler((error) => reject(new Error(error?.message || String(error))));
+    runner[functionName](...args);
+  });
+}
+
+async function serverCall(functionName, ...args) {
+  if (hasAppsScriptBridge()) return runAppsScript(functionName, ...args);
+  return localCall(functionName, ...args);
+}
+
+function readLocalState() {
+  try {
+    return normalizeState(JSON.parse(localStorage.getItem(STORAGE_KEY)));
+  } catch {
+    return createDefaultState();
+  }
+}
+
+function writeLocalState(state) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizeState({ ...state, updatedAt: isoNow() })));
+}
+
+function readStoredSession() {
+  try {
+    return JSON.parse(localStorage.getItem(SESSION_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredSession(session) {
+  if (session) localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  else localStorage.removeItem(SESSION_KEY);
+}
+
+async function localCall(functionName, ...args) {
+  const state = readLocalState();
+  const session = readStoredSession();
+
+  if (functionName === 'loginUnitServer') {
+    const [unitId, password] = args;
+    const unit = UNITS.find((item) => item.id === unitId);
+    if (!unit || normalizePassword(password) !== unit.password) throw new Error('Senha da unidade incorreta');
+    return { token: `local-unit-${unit.id}`, role: 'unit', unitId: unit.id, unitName: unit.name };
+  }
+
+  if (functionName === 'loginAdminServer') {
+    const [username, password] = args;
+    if (String(username || '').trim().toLowerCase() !== String(state.settings.adminUser).toLowerCase()) {
+      throw new Error('Login da Rosa incorreto');
+    }
+    if (String(password || '') !== String(state.settings.adminPassword)) throw new Error('Senha da Rosa incorreta');
+    return { token: 'local-admin', role: 'admin', user: state.settings.adminUser };
+  }
+
+  if (!session) throw new Error('Sessão expirada');
+
+  if (functionName === 'getStateServer') {
+    if (session.role === 'admin') return { role: 'admin', state };
+    return {
+      role: 'unit',
+      unitId: session.unitId,
+      unit: state.units[session.unitId],
+      messages: messagesForUnit(state, session.unitId)
+    };
+  }
+
+  if (functionName === 'saveUnitServer') {
+    const [, unitId, unitState] = args;
+    if (session.role !== 'admin' && session.unitId !== unitId) throw new Error('Acesso negado');
+    const next = normalizeState({
+      ...state,
+      updatedAt: isoNow(),
+      units: {
+        ...state.units,
+        [unitId]: { ...unitState, id: unitId, name: unitName(unitId) }
+      }
+    });
+    writeLocalState(next);
+    return session.role === 'admin'
+      ? { role: 'admin', state: next }
+      : { role: 'unit', unitId, unit: next.units[unitId], messages: messagesForUnit(next, unitId) };
+  }
+
+  if (functionName === 'sendMessageServer') {
+    const [, message] = args;
+    if (session.role !== 'admin') throw new Error('Apenas Rosa pode enviar recados');
+    const targets = message.targets?.length ? message.targets : UNITS.map((unit) => unit.id);
+    const next = normalizeState({
+      ...state,
+      updatedAt: isoNow(),
+      messages: [
+        {
+          id: uid('msg'),
+          title: message.title || 'Recado da Rosa',
+          text: message.text || '',
+          targets,
+          seenBy: [],
+          createdAt: isoNow()
+        },
+        ...state.messages
+      ].slice(0, 200)
+    });
+    writeLocalState(next);
+    return { role: 'admin', state: next };
+  }
+
+  if (functionName === 'markMessageSeenServer') {
+    const [, messageId] = args;
+    if (session.role !== 'unit') throw new Error('Apenas a unidade pode marcar recado');
+    const next = normalizeState({
+      ...state,
+      messages: state.messages.map((message) => {
+        if (message.id !== messageId) return message;
+        return { ...message, seenBy: Array.from(new Set([...(message.seenBy || []), session.unitId])) };
+      })
+    });
+    writeLocalState(next);
+    return {
+      role: 'unit',
+      unitId: session.unitId,
+      unit: next.units[session.unitId],
+      messages: messagesForUnit(next, session.unitId)
+    };
+  }
+
+  if (functionName === 'updateAdminPasswordServer') {
+    const [, currentPassword, nextPassword] = args;
+    if (session.role !== 'admin') throw new Error('Acesso negado');
+    if (String(currentPassword || '') !== String(state.settings.adminPassword)) throw new Error('Senha atual incorreta');
+    const next = normalizeState({
+      ...state,
+      settings: { ...state.settings, adminPassword: nextPassword }
+    });
+    writeLocalState(next);
+    return { role: 'admin', state: next };
+  }
+
+  if (functionName === 'emptyTrashServer') {
+    const [, unitId, password] = args;
+    const unit = UNITS.find((item) => item.id === unitId);
+    if (session.role !== 'admin') {
+      if (session.unitId !== unitId) throw new Error('Acesso negado');
+      if (normalizePassword(password) !== unit.password) throw new Error('Senha da unidade incorreta');
+    }
+    const nextUnit = addActivity(
+      {
+        ...state.units[unitId],
+        documents: state.units[unitId].documents.filter((doc) => !doc.deletedAt)
+      },
+      'trash_emptied',
+      {}
+    );
+    const next = normalizeState({ ...state, units: { ...state.units, [unitId]: nextUnit } });
+    writeLocalState(next);
+    return session.role === 'admin'
+      ? { role: 'admin', state: next }
+      : { role: 'unit', unitId, unit: next.units[unitId], messages: messagesForUnit(next, unitId) };
+  }
+
+  throw new Error(`Função local não encontrada: ${functionName}`);
+}
+
+function normalizePassword(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function uid(prefix) {
+  return `${prefix}_${crypto.randomUUID()}`;
+}
+
+function isoNow() {
+  return new Date().toISOString();
+}
+
+function unitName(unitId) {
+  return UNITS.find((unit) => unit.id === unitId)?.name || unitId;
+}
+
+function formatShortDate(value) {
+  if (!value) return 'sem data';
+  return new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: 'short' }).format(new Date(value));
+}
+
+function completion(doc) {
+  if (!doc.tasks?.length) return 0;
+  return Math.round((doc.tasks.filter((task) => task.done).length / doc.tasks.length) * 100);
+}
+
+function isComplete(doc) {
+  return doc.tasks?.length > 0 && doc.tasks.every((task) => task.done);
+}
+
+function messagesForUnit(state, unitId) {
+  return (state.messages || []).filter((message) => (message.targets || []).includes(unitId));
+}
+
+function addActivity(unitState, action, details = {}) {
+  return {
+    ...unitState,
+    activity: [
+      {
+        id: uid('act'),
+        action,
+        details,
+        createdAt: isoNow()
+      },
+      ...(unitState.activity || [])
+    ].slice(0, 120)
+  };
+}
+
+function App() {
+  const [session, setSession] = useState(() => readStoredSession());
+  const [appState, setAppState] = useState(createDefaultState());
+  const [unitState, setUnitState] = useState(null);
+  const [unitMessages, setUnitMessages] = useState([]);
+  const [syncMode, setSyncMode] = useState('carregando');
+  const [loginError, setLoginError] = useState('');
+  const refreshRef = useRef(null);
+
+  useEffect(() => {
+    writeStoredSession(session);
+  }, [session]);
+
+  useEffect(() => {
+    if (!session) {
+      setUnitState(null);
+      setUnitMessages([]);
+      setAppState(createDefaultState());
+      setSyncMode('pronto');
+      return undefined;
+    }
+
+    let active = true;
+    async function load(silent = false) {
+      if (!silent) setSyncMode('carregando');
+      try {
+        const response = await serverCall('getStateServer', session.token);
+        if (!active) return;
+        if (response.role === 'admin') {
+          setAppState(normalizeState(response.state));
+          setUnitState(null);
+        } else {
+          setUnitState(response.unit);
+          setUnitMessages(response.messages || []);
+        }
+        setSyncMode('sincronizado');
+      } catch {
+        if (active) setSyncMode('reconectar');
+      }
+    }
+
+    load();
+    refreshRef.current = setInterval(() => load(true), 7000);
+    return () => {
+      active = false;
+      clearInterval(refreshRef.current);
+    };
+  }, [session]);
+
+  async function loginUnit(unitId, password) {
+    setLoginError('');
+    try {
+      const response = await serverCall('loginUnitServer', unitId, password);
+      const nextSession = { token: response.token, role: 'unit', unitId: response.unitId };
+      setSession(nextSession);
+      writeStoredSession(nextSession);
+    } catch (error) {
+      setLoginError(error.message || 'Não consegui entrar nessa unidade.');
+    }
+  }
+
+  async function loginAdmin(username, password) {
+    setLoginError('');
+    try {
+      const response = await serverCall('loginAdminServer', username, password);
+      const nextSession = { token: response.token, role: 'admin', user: response.user };
+      setSession(nextSession);
+      writeStoredSession(nextSession);
+    } catch (error) {
+      setLoginError(error.message || 'Não consegui entrar no acesso da Rosa.');
+    }
+  }
+
+  function logout() {
+    setSession(null);
+    writeStoredSession(null);
+  }
+
+  async function saveUnit(unitId, nextUnit) {
+    if (session?.role === 'admin') {
+      setAppState((current) => normalizeState({ ...current, units: { ...current.units, [unitId]: nextUnit } }));
+    } else {
+      setUnitState(nextUnit);
+    }
+    setSyncMode('salvando');
+    try {
+      const response = await serverCall('saveUnitServer', session.token, unitId, nextUnit);
+      if (response.role === 'admin') setAppState(normalizeState(response.state));
+      else {
+        setUnitState(response.unit);
+        setUnitMessages(response.messages || []);
+      }
+      setSyncMode('sincronizado');
+    } catch {
+      setSyncMode('local');
+    }
+  }
+
+  async function emptyTrash(unitId, password) {
+    setSyncMode('salvando');
+    const response = await serverCall('emptyTrashServer', session.token, unitId, password);
+    if (response.role === 'admin') setAppState(normalizeState(response.state));
+    else {
+      setUnitState(response.unit);
+      setUnitMessages(response.messages || []);
+    }
+    setSyncMode('sincronizado');
+  }
+
+  async function sendMessage(message) {
+    setSyncMode('salvando');
+    const response = await serverCall('sendMessageServer', session.token, message);
+    setAppState(normalizeState(response.state));
+    setSyncMode('sincronizado');
+  }
+
+  async function markMessageSeen(messageId) {
+    const response = await serverCall('markMessageSeenServer', session.token, messageId);
+    setUnitState(response.unit);
+    setUnitMessages(response.messages || []);
+  }
+
+  async function changeAdminPassword(currentPassword, nextPassword) {
+    const response = await serverCall('updateAdminPasswordServer', session.token, currentPassword, nextPassword);
+    setAppState(normalizeState(response.state));
+  }
+
+  if (!session) {
+    return <AccessGate error={loginError} onAdminLogin={loginAdmin} onUnitLogin={loginUnit} />;
+  }
+
+  if (session.role === 'admin') {
+    return (
+      <AdminApp
+        state={appState}
+        syncMode={syncMode}
+        onLogout={logout}
+        onSaveUnit={saveUnit}
+        onEmptyTrash={emptyTrash}
+        onSendMessage={sendMessage}
+        onChangeAdminPassword={changeAdminPassword}
+      />
+    );
+  }
+
+  return (
+    <UnitApp
+      messages={unitMessages}
+      syncMode={syncMode}
+      unit={unitState || emptyUnit(UNITS.find((item) => item.id === session.unitId))}
+      unitId={session.unitId}
+      onEmptyTrash={emptyTrash}
+      onLogout={logout}
+      onMarkMessageSeen={markMessageSeen}
+      onSaveUnit={saveUnit}
+    />
+  );
+}
+
+function AccessGate({ error, onAdminLogin, onUnitLogin }) {
+  const [selectedUnit, setSelectedUnit] = useState(null);
+  const [unitPassword, setUnitPassword] = useState('');
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [adminUser, setAdminUser] = useState('');
+  const [adminPassword, setAdminPassword] = useState('');
+
+  const unit = UNITS.find((item) => item.id === selectedUnit);
+
+  return (
+    <main className="gate">
+      <section className="gate-card">
+        <span className="eyebrow">Controle por unidade</span>
+        <h1>Unidades</h1>
+        <p className="gate-copy">Escolha a unidade para abrir somente os documentos dela.</p>
+
+        <div className="unit-grid">
+          {UNITS.map((item) => (
+            <button
+              className={`unit-tile ${selectedUnit === item.id ? 'selected' : ''}`}
+              key={item.id}
+              onClick={() => {
+                setSelectedUnit(item.id);
+                setUnitPassword('');
+              }}
+              style={{ '--accent': item.accent }}
+              type="button"
+            >
+              <span>{item.name}</span>
+              <Lock size={18} />
+            </button>
+          ))}
+        </div>
+
+        {unit ? (
+          <form
+            className="gate-login"
+            onSubmit={(event) => {
+              event.preventDefault();
+              onUnitLogin(unit.id, unitPassword);
+            }}
+          >
+            <label>
+              Senha de {unit.name}
+              <input
+                autoFocus
+                inputMode="text"
+                onChange={(event) => setUnitPassword(event.target.value)}
+                placeholder="Senha da unidade"
+                type="password"
+                value={unitPassword}
+              />
+            </label>
+            <button className="primary" type="submit">
+              <ShieldCheck size={18} /> Entrar
+            </button>
+          </form>
+        ) : null}
+
+        {error ? <p className="error-line">{error}</p> : null}
+
+        <div className="admin-strip">
+          <button className="text-button" onClick={() => setAdminOpen((value) => !value)} type="button">
+            Acesso Rosa
+          </button>
+          {adminOpen ? (
+            <form
+              className="admin-login"
+              onSubmit={(event) => {
+                event.preventDefault();
+                onAdminLogin(adminUser, adminPassword);
+              }}
+            >
+              <input
+                aria-label="Login"
+                onChange={(event) => setAdminUser(event.target.value)}
+                placeholder="login"
+                value={adminUser}
+              />
+              <input
+                aria-label="Senha"
+                onChange={(event) => setAdminPassword(event.target.value)}
+                placeholder="senha"
+                type="password"
+                value={adminPassword}
+              />
+              <button className="icon-button" title="Entrar como Rosa" type="submit">
+                <Lock size={18} />
+              </button>
+            </form>
+          ) : null}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function UnitApp({ messages, onEmptyTrash, onLogout, onMarkMessageSeen, onSaveUnit, syncMode, unit, unitId }) {
+  return (
+    <main className="shell">
+      <Topbar
+        eyebrow="Registros de documentos"
+        onLogout={onLogout}
+        syncMode={syncMode}
+        title={unitName(unitId)}
+      />
+      <UnitMessages messages={messages} onSeen={onMarkMessageSeen} unitId={unitId} />
+      <DocumentWorkspace
+        mode="unit"
+        onEmptyTrash={onEmptyTrash}
+        onSaveUnit={(nextUnit) => onSaveUnit(unitId, nextUnit)}
+        unit={unit}
+      />
+    </main>
+  );
+}
+
+function AdminApp({ onChangeAdminPassword, onEmptyTrash, onLogout, onSaveUnit, onSendMessage, state, syncMode }) {
+  const [selectedUnitId, setSelectedUnitId] = useState(UNITS[0].id);
+  const selectedUnit = state.units[selectedUnitId] || emptyUnit(UNITS[0]);
+
+  return (
+    <main className="shell admin-shell">
+      <Topbar eyebrow="Painel da Rosa" onLogout={onLogout} syncMode={syncMode} title="Acompanhamento das unidades" />
+      <section className="admin-grid">
+        <AdminSummary selectedUnitId={selectedUnitId} state={state} onSelect={setSelectedUnitId} />
+        <AdminMessages state={state} onSendMessage={onSendMessage} />
+        <PasswordPanel onChangePassword={onChangeAdminPassword} />
+      </section>
+      <div className="admin-workspace-title">
+        <span className="eyebrow">Unidade em acompanhamento</span>
+        <h2>{unitName(selectedUnitId)}</h2>
+      </div>
+      <DocumentWorkspace
+        mode="admin"
+        onEmptyTrash={onEmptyTrash}
+        onSaveUnit={(nextUnit) => onSaveUnit(selectedUnitId, nextUnit)}
+        unit={selectedUnit}
+      />
+    </main>
+  );
+}
+
+function Topbar({ eyebrow, onLogout, syncMode, title }) {
+  return (
+    <header className="topbar">
+      <div>
+        <span className="eyebrow">{eyebrow}</span>
+        <h1>{title}</h1>
+      </div>
+      <span className={`sync ${syncMode}`}>{syncMode}</span>
+      <button className="icon-button" onClick={onLogout} title="Sair" type="button">
+        <LogOut size={21} />
+      </button>
+    </header>
+  );
+}
+
+function UnitMessages({ messages, onSeen, unitId }) {
+  const visible = messages.filter((message) => !(message.seenBy || []).includes(unitId));
+  if (!visible.length) return null;
+
+  return (
+    <section className="message-band">
+      <div className="message-band-head">
+        <MessageSquare size={18} />
+        <strong>Recados da Rosa</strong>
+      </div>
+      <div className="message-list">
+        {visible.map((message) => (
+          <article className="message-card" key={message.id}>
+            <div>
+              <strong>{message.title}</strong>
+              <p>{message.text}</p>
+              <small>{formatShortDate(message.createdAt)}</small>
+            </div>
+            <button className="ghost" onClick={() => onSeen(message.id)} type="button">
+              <Check size={17} /> Visto
+            </button>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AdminSummary({ onSelect, selectedUnitId, state }) {
+  return (
+    <section className="admin-card summary-card">
+      <div className="section-title">
+        <Users size={18} />
+        <h2>Unidades</h2>
+      </div>
+      <div className="summary-list">
+        {UNITS.map((unit) => {
+          const docs = state.units[unit.id]?.documents || [];
+          const active = docs.filter((doc) => !doc.deletedAt);
+          const done = active.filter(isComplete);
+          return (
+            <button
+              className={`summary-row ${selectedUnitId === unit.id ? 'selected' : ''}`}
+              key={unit.id}
+              onClick={() => onSelect(unit.id)}
+              style={{ '--accent': unit.accent }}
+              type="button"
+            >
+              <span>
+                <strong>{unit.name}</strong>
+                <small>{done.length}/{active.length} finalizados</small>
+              </span>
+              <b>{active.filter((doc) => !isComplete(doc)).length}</b>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function AdminMessages({ onSendMessage, state }) {
+  const [title, setTitle] = useState('');
+  const [text, setText] = useState('');
+  const [targets, setTargets] = useState(() => UNITS.map((unit) => unit.id));
+
+  function toggleTarget(unitId) {
+    setTargets((current) => {
+      if (current.includes(unitId)) return current.filter((item) => item !== unitId);
+      return [...current, unitId];
+    });
+  }
+
+  async function submit(event) {
+    event.preventDefault();
+    if (!text.trim()) return;
+    await onSendMessage({
+      title: title.trim() || 'Recado da Rosa',
+      text: text.trim(),
+      targets: targets.length ? targets : UNITS.map((unit) => unit.id)
+    });
+    setTitle('');
+    setText('');
+  }
+
+  return (
+    <section className="admin-card">
+      <div className="section-title">
+        <Send size={18} />
+        <h2>Recado para unidades</h2>
+      </div>
+      <form className="message-form" onSubmit={submit}>
+        <input onChange={(event) => setTitle(event.target.value)} placeholder="Título do recado" value={title} />
+        <textarea onChange={(event) => setText(event.target.value)} placeholder="Mensagem" value={text} />
+        <div className="target-row">
+          {UNITS.map((unit) => (
+            <button
+              className={targets.includes(unit.id) ? 'selected' : ''}
+              key={unit.id}
+              onClick={() => toggleTarget(unit.id)}
+              type="button"
+            >
+              {unit.name}
+            </button>
+          ))}
+        </div>
+        <button className="primary" type="submit">
+          <Send size={17} /> Enviar
+        </button>
+      </form>
+      <div className="sent-log">
+        {state.messages.slice(0, 4).map((message) => (
+          <p key={message.id}>
+            <strong>{message.title}</strong>
+            <span>{(message.seenBy || []).length}/{message.targets.length} viram</span>
+          </p>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PasswordPanel({ onChangePassword }) {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [nextPassword, setNextPassword] = useState('');
+  const [status, setStatus] = useState('');
+
+  async function submit(event) {
+    event.preventDefault();
+    setStatus('');
+    try {
+      await onChangePassword(currentPassword, nextPassword);
+      setCurrentPassword('');
+      setNextPassword('');
+      setStatus('Senha atualizada');
+    } catch {
+      setStatus('Não consegui atualizar a senha');
+    }
+  }
+
+  return (
+    <section className="admin-card password-card">
+      <div className="section-title">
+        <Settings size={18} />
+        <h2>Acesso da Rosa</h2>
+      </div>
+      <form className="password-form" onSubmit={submit}>
+        <input
+          onChange={(event) => setCurrentPassword(event.target.value)}
+          placeholder="senha atual"
+          type="password"
+          value={currentPassword}
+        />
+        <input
+          onChange={(event) => setNextPassword(event.target.value)}
+          placeholder="nova senha"
+          type="password"
+          value={nextPassword}
+        />
+        <button className="ghost" type="submit">
+          Alterar
+        </button>
+      </form>
+      {status ? <small>{status}</small> : null}
+    </section>
+  );
+}
+
+function DocumentWorkspace({ mode, onEmptyTrash, onSaveUnit, unit }) {
+  const [history, setHistory] = useState([]);
+  const [future, setFuture] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState('active');
+  const [mobileView, setMobileView] = useState('list');
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [trashOpen, setTrashOpen] = useState(false);
+
+  const selected = useMemo(
+    () => unit.documents.find((doc) => doc.id === selectedId) || unit.documents.find((doc) => !doc.deletedAt),
+    [selectedId, unit.documents]
+  );
+
+  const visibleDocs = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return unit.documents
+      .filter((doc) => {
+        if (filter === 'trash') return Boolean(doc.deletedAt);
+        if (doc.deletedAt) return false;
+        if (filter === 'done') return isComplete(doc);
+        if (filter === 'pending') return !isComplete(doc);
+        return true;
+      })
+      .filter((doc) => {
+        if (!needle) return true;
+        return [doc.title, doc.owner, doc.context, ...(doc.tasks || []).map((task) => task.text)]
+          .join(' ')
+          .toLowerCase()
+          .includes(needle);
+      });
+  }, [filter, query, unit.documents]);
+
+  const activeCount = unit.documents.filter((doc) => !doc.deletedAt).length;
+  const pendingCount = unit.documents.filter((doc) => !doc.deletedAt && !isComplete(doc)).length;
+  const doneCount = unit.documents.filter((doc) => !doc.deletedAt && isComplete(doc)).length;
+
+  useEffect(() => {
+    if (selected?.id) setSelectedId(selected.id);
+  }, [selected?.id]);
+
+  function commit(recipe, action, details = {}) {
+    setHistory((current) => [unit, ...current].slice(0, 40));
+    setFuture([]);
+    const next = addActivity(recipe(unit), action, details);
+    onSaveUnit(next);
+  }
+
+  function undo() {
+    if (!history.length) return;
+    const [previous, ...rest] = history;
+    setFuture((current) => [unit, ...current].slice(0, 40));
+    setHistory(rest);
+    onSaveUnit(previous);
+  }
+
+  function redo() {
+    if (!future.length) return;
+    const [next, ...rest] = future;
+    setHistory((current) => [unit, ...current].slice(0, 40));
+    setFuture(rest);
+    onSaveUnit(next);
+  }
+
+  function createDocument(payload) {
+    const doc = {
+      id: uid('doc'),
+      title: payload.title,
+      owner: payload.owner,
+      context: payload.context,
+      color: COLORS[unit.documents.length % COLORS.length],
+      createdAt: isoNow(),
+      updatedAt: isoNow(),
+      tasks: payload.tasks.map((task, index) => ({
+        id: uid('task'),
+        text: task,
+        done: false,
+        note: '',
+        order: index,
+        createdAt: isoNow(),
+        updatedAt: isoNow()
+      }))
+    };
+    commit(
+      (current) => ({
+        ...current,
+        documents: [doc, ...current.documents]
+      }),
+      'document_created',
+      { title: doc.title }
+    );
+    setSelectedId(doc.id);
+    setMobileView('detail');
+    setWizardOpen(false);
+  }
+
+  function patchDocument(documentId, patcher, action = 'document_updated') {
+    commit(
+      (current) => ({
+        ...current,
+        documents: current.documents.map((doc) => {
+          if (doc.id !== documentId) return doc;
+          return { ...patcher(doc), updatedAt: isoNow() };
+        })
+      }),
+      action,
+      { documentId }
+    );
+  }
+
+  return (
+    <>
+      <section className="stats-row">
+        <Stat label="ativos" value={activeCount} />
+        <Stat label="pendentes" tone="warm" value={pendingCount} />
+        <Stat label="finalizados" tone="good" value={doneCount} />
+        <button className="icon-button mobile-only" onClick={() => setMobileView('list')} title="Lista" type="button">
+          <FileText size={21} />
+        </button>
+        <button className="icon-button" disabled={!history.length} onClick={undo} title="Desfazer" type="button">
+          <Undo2 size={21} />
+        </button>
+        <button className="icon-button" disabled={!future.length} onClick={redo} title="Refazer" type="button">
+          <Redo2 size={21} />
+        </button>
+        <button className="primary" onClick={() => setWizardOpen(true)} type="button">
+          <Plus size={21} /> Novo
+        </button>
+      </section>
+
+      <section className={`workspace ${mobileView === 'detail' ? 'show-detail' : 'show-list'}`}>
+        <aside className="sidebar">
+          <label className="searchbox">
+            <Search size={20} />
+            <input
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Buscar documento ou alteração"
+              value={query}
+            />
+          </label>
+
+          <div className="filters">
+            <FilterButton active={filter === 'active'} label="Ativos" onClick={() => setFilter('active')} />
+            <FilterButton active={filter === 'pending'} label="Pendentes" onClick={() => setFilter('pending')} />
+            <FilterButton active={filter === 'done'} label="Finalizados" onClick={() => setFilter('done')} />
+            <FilterButton active={filter === 'trash'} label="Lixeira" onClick={() => setFilter('trash')} />
+          </div>
+
+          <div className="doc-list">
+            {visibleDocs.length ? (
+              visibleDocs.map((doc) => (
+                <button
+                  className={`doc-card ${selected?.id === doc.id ? 'selected' : ''}`}
+                  key={doc.id}
+                  onClick={() => {
+                    setSelectedId(doc.id);
+                    setMobileView('detail');
+                  }}
+                  style={{ '--accent': doc.color || '#69b578' }}
+                  type="button"
+                >
+                  <span>
+                    <strong>{doc.title}</strong>
+                    <small>{doc.context || doc.owner || 'Sem contexto'}</small>
+                  </span>
+                  <Lightbulb className={isComplete(doc) ? 'lit' : ''} size={21} />
+                  <ProgressBar value={completion(doc)} />
+                </button>
+              ))
+            ) : (
+              <p className="empty">Nada por aqui ainda.</p>
+            )}
+          </div>
+        </aside>
+
+        <main className="detail">
+          {selected ? (
+            <DocumentDetail
+              doc={selected}
+              mode={mode}
+              onBack={() => setMobileView('list')}
+              onEmptyTrash={() => setTrashOpen(true)}
+              onPatch={patchDocument}
+            />
+          ) : (
+            <section className="empty-detail">
+              <FileText size={42} />
+              <h2>Nenhum documento selecionado</h2>
+              <button className="primary" onClick={() => setWizardOpen(true)} type="button">
+                <Plus size={18} /> Criar registro
+              </button>
+            </section>
+          )}
+        </main>
+      </section>
+
+      {wizardOpen ? <NewDocumentModal onClose={() => setWizardOpen(false)} onCreate={createDocument} /> : null}
+      {trashOpen ? (
+        <TrashModal
+          mode={mode}
+          onClose={() => setTrashOpen(false)}
+          onConfirm={async (password) => {
+            await onEmptyTrash(unit.id, password);
+            setTrashOpen(false);
+          }}
+          unitName={unit.name}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function Stat({ label, tone = '', value }) {
+  return (
+    <div className={`stat ${tone}`}>
+      <strong>{value}</strong>
+      <span>{label}</span>
+    </div>
+  );
+}
+
+function FilterButton({ active, label, onClick }) {
+  return (
+    <button className={active ? 'active' : ''} onClick={onClick} type="button">
+      <Filter size={17} /> {label}
+    </button>
+  );
+}
+
+function DocumentDetail({ doc, mode, onBack, onEmptyTrash, onPatch }) {
+  const doneCount = doc.tasks.filter((task) => task.done).length;
+  const [draftTask, setDraftTask] = useState('');
+  const [editingDoc, setEditingDoc] = useState(false);
+  const [docDraft, setDocDraft] = useState({ title: doc.title, owner: doc.owner || '', context: doc.context || '' });
+
+  useEffect(() => {
+    setDocDraft({ title: doc.title, owner: doc.owner || '', context: doc.context || '' });
+    setEditingDoc(false);
+  }, [doc.id, doc.title, doc.owner, doc.context]);
+
+  function addTask() {
+    const text = draftTask.trim();
+    if (!text) return;
+    onPatch(doc.id, (current) => ({
+      ...current,
+      tasks: [
+        ...current.tasks,
+        {
+          id: uid('task'),
+          text,
+          done: false,
+          note: '',
+          order: current.tasks.length,
+          createdAt: isoNow(),
+          updatedAt: isoNow()
+        }
+      ]
+    }));
+    setDraftTask('');
+  }
+
+  function moveTask(taskId, direction) {
+    const tasks = [...doc.tasks];
+    const index = tasks.findIndex((task) => task.id === taskId);
+    const nextIndex = index + direction;
+    if (nextIndex < 0 || nextIndex >= tasks.length) return;
+    [tasks[index], tasks[nextIndex]] = [tasks[nextIndex], tasks[index]];
+    onPatch(doc.id, (current) => ({
+      ...current,
+      tasks: tasks.map((task, order) => ({ ...task, order }))
+    }));
+  }
+
+  function updateTask(taskId, patch) {
+    onPatch(doc.id, (current) => ({
+      ...current,
+      tasks: current.tasks.map((task) => (task.id === taskId ? { ...task, ...patch, updatedAt: isoNow() } : task))
+    }));
+  }
+
+  function removeTask(taskId) {
+    onPatch(doc.id, (current) => ({
+      ...current,
+      tasks: current.tasks.filter((task) => task.id !== taskId).map((task, order) => ({ ...task, order }))
+    }));
+  }
+
+  return (
+    <article className="detail-card">
+      <button className="back-button mobile-only" onClick={onBack} type="button">
+        <ArrowLeft size={19} /> Documentos
+      </button>
+
+      <header className="detail-head">
+        <div>
+          <span className="eyebrow">Documento</span>
+          {editingDoc ? (
+            <div className="doc-edit-grid">
+              <input
+                onChange={(event) => setDocDraft((draft) => ({ ...draft, title: event.target.value }))}
+                value={docDraft.title}
+              />
+              <input
+                onChange={(event) => setDocDraft((draft) => ({ ...draft, owner: event.target.value }))}
+                placeholder="Responsável ou pedido por"
+                value={docDraft.owner}
+              />
+              <input
+                onChange={(event) => setDocDraft((draft) => ({ ...draft, context: event.target.value }))}
+                placeholder="Contexto rápido"
+                value={docDraft.context}
+              />
+              <button
+                className="primary"
+                onClick={() => {
+                  onPatch(doc.id, (current) => ({ ...current, ...docDraft }));
+                  setEditingDoc(false);
+                }}
+                type="button"
+              >
+                <Check size={17} /> Salvar
+              </button>
+            </div>
+          ) : (
+            <>
+              <h2>{doc.title}</h2>
+              <p className="meta-line">
+                <Clock3 size={18} /> Atualizado {formatShortDate(doc.updatedAt)} <Check size={18} /> {completion(doc)}%
+              </p>
+            </>
+          )}
+        </div>
+        <div className="detail-actions">
+          <button className="icon-button" onClick={() => setEditingDoc((value) => !value)} title="Editar" type="button">
+            <Pencil size={20} />
+          </button>
+          <span className={`lamp ${isComplete(doc) ? 'on' : ''}`}>
+            <Lightbulb size={32} />
+          </span>
+        </div>
+      </header>
+
+      {!editingDoc ? (
+        <div className="context-grid">
+          <label>
+            Responsável ou pedido por
+            <input
+              onChange={(event) => onPatch(doc.id, (current) => ({ ...current, owner: event.target.value }))}
+              value={doc.owner || ''}
+            />
+          </label>
+          <label>
+            Contexto rápido
+            <input
+              onChange={(event) => onPatch(doc.id, (current) => ({ ...current, context: event.target.value }))}
+              value={doc.context || ''}
+            />
+          </label>
+        </div>
+      ) : null}
+
+      <section className="task-panel">
+        <div className="section-title">
+          <h3>Alterações e pendências</h3>
+          <span>{doneCount}/{doc.tasks.length}</span>
+        </div>
+
+        <div className="task-list">
+          {doc.tasks.map((task, index) => (
+            <TaskRow
+              index={index}
+              key={task.id}
+              onMove={moveTask}
+              onRemove={removeTask}
+              onUpdate={updateTask}
+              task={task}
+              total={doc.tasks.length}
+            />
+          ))}
+        </div>
+
+        <form
+          className="add-task"
+          onSubmit={(event) => {
+            event.preventDefault();
+            addTask();
+          }}
+        >
+          <ListPlus size={21} />
+          <input
+            onChange={(event) => setDraftTask(event.target.value)}
+            placeholder="Adicionar outra alteração"
+            value={draftTask}
+          />
+          <button className="primary square" type="submit">
+            <Plus size={21} />
+          </button>
+        </form>
+      </section>
+
+      <section className="meeting-card">
+        <h3>Cola para reunião</h3>
+        <p>Use os marcadores para saber o que já foi falado.</p>
+        <div className="chips">
+          {doc.tasks.map((task) => (
+            <span className={task.done ? 'done' : ''} key={task.id}>
+              {task.text}
+            </span>
+          ))}
+        </div>
+      </section>
+
+      {doc.deletedAt ? (
+        <button className="primary full" onClick={() => onPatch(doc.id, (current) => ({ ...current, deletedAt: '' }))} type="button">
+          Restaurar documento
+        </button>
+      ) : (
+        <button className="danger full" onClick={() => onPatch(doc.id, (current) => ({ ...current, deletedAt: isoNow() }))} type="button">
+          <Trash2 size={19} /> Mover para lixeira
+        </button>
+      )}
+
+      <button className="ghost full" onClick={onEmptyTrash} type="button">
+        Limpar lixeira da unidade
+      </button>
+      {mode === 'admin' ? <small className="hint">A Rosa acompanha e edita esta unidade sem precisar entrar pela senha da unidade.</small> : null}
+    </article>
+  );
+}
+
+function TaskRow({ index, onMove, onRemove, onUpdate, task, total }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(task.text);
+
+  useEffect(() => setDraft(task.text), [task.text]);
+
+  return (
+    <div className={`task-row ${task.done ? 'done' : ''}`}>
+      <GripVertical className="drag-icon" size={21} />
+      <button
+        className={`check-button ${task.done ? 'checked' : ''}`}
+        onClick={() => onUpdate(task.id, { done: !task.done })}
+        title="Marcar"
+        type="button"
+      >
+        {task.done ? <Check size={20} /> : <Circle size={20} />}
+      </button>
+      {editing ? (
+        <input className="task-edit" onChange={(event) => setDraft(event.target.value)} value={draft} />
+      ) : (
+        <span>{task.text}</span>
+      )}
+      <div className="task-actions">
+        <button className="icon-button mini" disabled={index === 0} onClick={() => onMove(task.id, -1)} title="Subir" type="button">
+          <ArrowUp size={16} />
+        </button>
+        <button
+          className="icon-button mini"
+          disabled={index === total - 1}
+          onClick={() => onMove(task.id, 1)}
+          title="Descer"
+          type="button"
+        >
+          <ArrowDown size={16} />
+        </button>
+        {editing ? (
+          <button
+            className="icon-button mini"
+            onClick={() => {
+              onUpdate(task.id, { text: draft.trim() || task.text });
+              setEditing(false);
+            }}
+            title="Salvar"
+            type="button"
+          >
+            <Check size={16} />
+          </button>
+        ) : (
+          <button className="icon-button mini" onClick={() => setEditing(true)} title="Editar" type="button">
+            <Pencil size={16} />
+          </button>
+        )}
+        <button className="icon-button mini" onClick={() => onRemove(task.id)} title="Excluir" type="button">
+          <X size={16} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function NewDocumentModal({ onClose, onCreate }) {
+  const [step, setStep] = useState(0);
+  const [title, setTitle] = useState('');
+  const [owner, setOwner] = useState('');
+  const [context, setContext] = useState('');
+  const [taskDraft, setTaskDraft] = useState('');
+  const [tasks, setTasks] = useState([]);
+
+  function addTask() {
+    const text = taskDraft.trim();
+    if (!text) return;
+    setTasks((current) => [...current, text]);
+    setTaskDraft('');
+  }
+
+  function create() {
+    if (!title.trim()) return;
+    onCreate({
+      title: title.trim(),
+      owner: owner.trim(),
+      context: context.trim(),
+      tasks: tasks.length ? tasks : ['Conferir documento']
+    });
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <section className="modal">
+        <button className="icon-button close" onClick={onClose} type="button">
+          <X size={20} />
+        </button>
+        <span className="eyebrow">Novo registro</span>
+        <h2>O que você gostaria de guardar?</h2>
+        {step === 0 ? (
+          <label>
+            Nome do documento
+            <input autoFocus onChange={(event) => setTitle(event.target.value)} placeholder="Ex.: PTP da asa" value={title} />
+          </label>
+        ) : null}
+        {step === 1 ? (
+          <div className="modal-grid">
+            <label>
+              Responsável ou pedido por
+              <input onChange={(event) => setOwner(event.target.value)} placeholder="Ex.: Maria, Rosa" value={owner} />
+            </label>
+            <label>
+              Contexto rápido
+              <input onChange={(event) => setContext(event.target.value)} placeholder="Ex.: reunião do PTP" value={context} />
+            </label>
+          </div>
+        ) : null}
+        {step === 2 ? (
+          <div>
+            <form
+              className="add-task"
+              onSubmit={(event) => {
+                event.preventDefault();
+                addTask();
+              }}
+            >
+              <ListPlus size={20} />
+              <input
+                onChange={(event) => setTaskDraft(event.target.value)}
+                placeholder="O que foi alterado ou ficou pendente?"
+                value={taskDraft}
+              />
+              <button className="primary square" type="submit">
+                <Plus size={20} />
+              </button>
+            </form>
+            <div className="chips task-preview">
+              {tasks.map((task) => (
+                <span key={task}>{task}</span>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        <div className="modal-actions">
+          <button className="ghost" disabled={step === 0} onClick={() => setStep((value) => value - 1)} type="button">
+            Voltar
+          </button>
+          {step < 2 ? (
+            <button className="primary" disabled={step === 0 && !title.trim()} onClick={() => setStep((value) => value + 1)} type="button">
+              Continuar
+            </button>
+          ) : (
+            <button className="primary" onClick={create} type="button">
+              Criar documento
+            </button>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TrashModal({ mode, onClose, onConfirm, unitName }) {
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+
+  async function submit(event) {
+    event.preventDefault();
+    setError('');
+    try {
+      await onConfirm(password);
+    } catch {
+      setError('Não consegui limpar a lixeira.');
+    }
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <form className="modal compact" onSubmit={submit}>
+        <button className="icon-button close" onClick={onClose} type="button">
+          <X size={20} />
+        </button>
+        <span className="eyebrow">Lixeira</span>
+        <h2>Limpar lixeira de {unitName}?</h2>
+        {mode === 'unit' ? (
+          <label>
+            Confirme com a senha da unidade
+            <input autoFocus onChange={(event) => setPassword(event.target.value)} type="password" value={password} />
+          </label>
+        ) : null}
+        {error ? <p className="error-line">{error}</p> : null}
+        <div className="modal-actions">
+          <button className="ghost" onClick={onClose} type="button">
+            Cancelar
+          </button>
+          <button className="danger" type="submit">
+            Limpar
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ProgressBar({ value }) {
+  return (
+    <span className="progress">
+      <i style={{ width: `${value}%` }} />
+    </span>
+  );
+}
+
+createRoot(document.getElementById('root')).render(<App />);

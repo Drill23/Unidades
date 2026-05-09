@@ -24,6 +24,7 @@ import {
   ShieldCheck,
   Trash2,
   Undo2,
+  Bell,
   Users,
   X
 } from 'lucide-react';
@@ -31,6 +32,7 @@ import './styles.css';
 
 const STORAGE_KEY = 'unidades-state';
 const SESSION_KEY = 'unidades-session';
+const NOTIFY_KEY = 'unidades-notifications';
 const COLORS = ['#69b578', '#e0a458', '#5d8aa8', '#d96570', '#7b6bb7'];
 const UNITS = [
   { id: 'jaguapita', name: 'Jaguapitã', password: 'jaguapita', accent: '#69b578' },
@@ -81,7 +83,16 @@ function normalizeState(input) {
         }
       ])
     ),
-    messages: Array.isArray(state.messages) ? state.messages : []
+    messages: Array.isArray(state.messages) ? state.messages.map(normalizeMessage) : []
+  };
+}
+
+function normalizeMessage(message) {
+  return {
+    ...message,
+    targets: Array.isArray(message.targets) ? message.targets : [],
+    seenBy: Array.isArray(message.seenBy) ? message.seenBy : [],
+    replies: Array.isArray(message.replies) ? message.replies : []
   };
 }
 
@@ -191,6 +202,7 @@ async function localCall(functionName, ...args) {
           text: message.text || '',
           targets,
           seenBy: [],
+          replies: [],
           createdAt: isoNow()
         },
         ...state.messages
@@ -198,6 +210,68 @@ async function localCall(functionName, ...args) {
     });
     writeLocalState(next);
     return { role: 'admin', state: next };
+  }
+
+  if (functionName === 'updateMessageServer') {
+    const [, messageId, patch] = args;
+    if (session.role !== 'admin') throw new Error('Apenas Rosa pode editar recados');
+    const targets = patch.targets?.length ? patch.targets : UNITS.map((unit) => unit.id);
+    const next = normalizeState({
+      ...state,
+      updatedAt: isoNow(),
+      messages: state.messages.map((message) =>
+        message.id === messageId
+          ? {
+              ...message,
+              title: patch.title || message.title,
+              text: patch.text || '',
+              targets,
+              seenBy: [],
+              updatedAt: isoNow()
+            }
+          : message
+      )
+    });
+    writeLocalState(next);
+    return { role: 'admin', state: next };
+  }
+
+  if (functionName === 'deleteMessageServer') {
+    const [, messageId] = args;
+    if (session.role !== 'admin') throw new Error('Apenas Rosa pode apagar recados');
+    const next = normalizeState({ ...state, updatedAt: isoNow(), messages: state.messages.filter((message) => message.id !== messageId) });
+    writeLocalState(next);
+    return { role: 'admin', state: next };
+  }
+
+  if (functionName === 'replyMessageServer') {
+    const [, messageId, text] = args;
+    if (session.role !== 'unit') throw new Error('Apenas a unidade pode responder');
+    const cleanText = String(text || '').trim();
+    if (!cleanText) throw new Error('Resposta vazia');
+    const next = normalizeState({
+      ...state,
+      updatedAt: isoNow(),
+      messages: state.messages.map((message) => {
+        if (message.id !== messageId) return message;
+        if (!message.targets.includes(session.unitId)) throw new Error('Recado não pertence à unidade');
+        return {
+          ...message,
+          replies: [
+            { id: uid('reply'), unitId: session.unitId, text: cleanText, createdAt: isoNow() },
+            ...(message.replies || [])
+          ],
+          updatedAt: isoNow()
+        };
+      })
+    });
+    writeLocalState(next);
+    return {
+      role: 'unit',
+      unitId: session.unitId,
+      unit: next.units[session.unitId],
+      messages: messagesForUnit(next, session.unitId)
+    };
   }
 
   if (functionName === 'markMessageSeenServer') {
@@ -294,6 +368,54 @@ function messagesForUnit(state, unitId) {
   return (state.messages || []).filter((message) => (message.targets || []).includes(unitId));
 }
 
+function notifySettingEnabled(unitId) {
+  try {
+    const settings = JSON.parse(localStorage.getItem(NOTIFY_KEY)) || {};
+    return Boolean(settings[unitId]);
+  } catch {
+    return false;
+  }
+}
+
+function setNotifySetting(unitId, enabled) {
+  const settings = (() => {
+    try {
+      return JSON.parse(localStorage.getItem(NOTIFY_KEY)) || {};
+    } catch {
+      return {};
+    }
+  })();
+  localStorage.setItem(NOTIFY_KEY, JSON.stringify({ ...settings, [unitId]: enabled }));
+}
+
+function relativeTime(value) {
+  if (!value) return 'sem data';
+  const date = new Date(value);
+  const diffMs = date.getTime() - Date.now();
+  const abs = Math.abs(diffMs);
+  const units = [
+    ['day', 86400000],
+    ['hour', 3600000],
+    ['minute', 60000]
+  ];
+  const formatter = new Intl.RelativeTimeFormat('pt-BR', { numeric: 'auto' });
+  for (const [unit, size] of units) {
+    if (abs >= size) return formatter.format(Math.round(diffMs / size), unit);
+  }
+  return 'agora';
+}
+
+function fullDateTime(value) {
+  if (!value) return 'sem data';
+  return new Intl.DateTimeFormat('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(new Date(value));
+}
+
 function addActivity(unitState, action, details = {}) {
   return {
     ...unitState,
@@ -316,6 +438,7 @@ function App() {
   const [unitMessages, setUnitMessages] = useState([]);
   const [syncMode, setSyncMode] = useState('carregando');
   const [loginError, setLoginError] = useState('');
+  const notifiedMessages = useRef(new Set());
   const refreshRef = useRef(null);
 
   useEffect(() => {
@@ -357,6 +480,23 @@ function App() {
       clearInterval(refreshRef.current);
     };
   }, [session]);
+
+  useEffect(() => {
+    if (session?.role !== 'unit') return;
+    if (!('Notification' in window)) return;
+    if (!notifySettingEnabled(session.unitId) || Notification.permission !== 'granted') return;
+    unitMessages
+      .filter((message) => !(message.seenBy || []).includes(session.unitId))
+      .forEach((message) => {
+        const marker = `${session.unitId}:${message.id}:${message.updatedAt || message.createdAt}`;
+        if (notifiedMessages.current.has(marker)) return;
+        notifiedMessages.current.add(marker);
+        new Notification(`Recado da Rosa para ${unitName(session.unitId)}`, {
+          body: message.title || message.text,
+          tag: marker
+        });
+      });
+  }, [session, unitMessages]);
 
   async function loginUnit(unitId, password) {
     setLoginError('');
@@ -425,8 +565,28 @@ function App() {
     setSyncMode('sincronizado');
   }
 
+  async function updateMessage(messageId, patch) {
+    setSyncMode('salvando');
+    const response = await serverCall('updateMessageServer', session.token, messageId, patch);
+    setAppState(normalizeState(response.state));
+    setSyncMode('sincronizado');
+  }
+
+  async function deleteMessage(messageId) {
+    setSyncMode('salvando');
+    const response = await serverCall('deleteMessageServer', session.token, messageId);
+    setAppState(normalizeState(response.state));
+    setSyncMode('sincronizado');
+  }
+
   async function markMessageSeen(messageId) {
     const response = await serverCall('markMessageSeenServer', session.token, messageId);
+    setUnitState(response.unit);
+    setUnitMessages(response.messages || []);
+  }
+
+  async function replyMessage(messageId, text) {
+    const response = await serverCall('replyMessageServer', session.token, messageId, text);
     setUnitState(response.unit);
     setUnitMessages(response.messages || []);
   }
@@ -449,6 +609,8 @@ function App() {
         onSaveUnit={saveUnit}
         onEmptyTrash={emptyTrash}
         onSendMessage={sendMessage}
+        onUpdateMessage={updateMessage}
+        onDeleteMessage={deleteMessage}
         onChangeAdminPassword={changeAdminPassword}
       />
     );
@@ -463,6 +625,7 @@ function App() {
       onEmptyTrash={emptyTrash}
       onLogout={logout}
       onMarkMessageSeen={markMessageSeen}
+      onReplyMessage={replyMessage}
       onSaveUnit={saveUnit}
     />
   );
@@ -565,7 +728,7 @@ function AccessGate({ error, onAdminLogin, onUnitLogin }) {
   );
 }
 
-function UnitApp({ messages, onEmptyTrash, onLogout, onMarkMessageSeen, onSaveUnit, syncMode, unit, unitId }) {
+function UnitApp({ messages, onEmptyTrash, onLogout, onMarkMessageSeen, onReplyMessage, onSaveUnit, syncMode, unit, unitId }) {
   return (
     <main className="shell">
       <Topbar
@@ -574,7 +737,7 @@ function UnitApp({ messages, onEmptyTrash, onLogout, onMarkMessageSeen, onSaveUn
         syncMode={syncMode}
         title={unitName(unitId)}
       />
-      <UnitMessages messages={messages} onSeen={onMarkMessageSeen} unitId={unitId} />
+      <UnitMessages messages={messages} onReply={onReplyMessage} onSeen={onMarkMessageSeen} unitId={unitId} />
       <DocumentWorkspace
         mode="unit"
         onEmptyTrash={onEmptyTrash}
@@ -585,7 +748,17 @@ function UnitApp({ messages, onEmptyTrash, onLogout, onMarkMessageSeen, onSaveUn
   );
 }
 
-function AdminApp({ onChangeAdminPassword, onEmptyTrash, onLogout, onSaveUnit, onSendMessage, state, syncMode }) {
+function AdminApp({
+  onChangeAdminPassword,
+  onDeleteMessage,
+  onEmptyTrash,
+  onLogout,
+  onSaveUnit,
+  onSendMessage,
+  onUpdateMessage,
+  state,
+  syncMode
+}) {
   const [selectedUnitId, setSelectedUnitId] = useState(UNITS[0].id);
   const selectedUnit = state.units[selectedUnitId] || emptyUnit(UNITS[0]);
 
@@ -595,6 +768,11 @@ function AdminApp({ onChangeAdminPassword, onEmptyTrash, onLogout, onSaveUnit, o
       <section className="admin-grid">
         <AdminSummary selectedUnitId={selectedUnitId} state={state} onSelect={setSelectedUnitId} />
         <AdminMessages state={state} onSendMessage={onSendMessage} />
+        <MessageHistory
+          messages={state.messages}
+          onDeleteMessage={onDeleteMessage}
+          onUpdateMessage={onUpdateMessage}
+        />
         <PasswordPanel onChangePassword={onChangeAdminPassword} />
       </section>
       <div className="admin-workspace-title">
@@ -626,31 +804,107 @@ function Topbar({ eyebrow, onLogout, syncMode, title }) {
   );
 }
 
-function UnitMessages({ messages, onSeen, unitId }) {
+function UnitMessages({ messages, onReply, onSeen, unitId }) {
   const visible = messages.filter((message) => !(message.seenBy || []).includes(unitId));
-  if (!visible.length) return null;
+  const [expanded, setExpanded] = useState(Boolean(visible.length));
+  const [notifyEnabled, setNotifyEnabled] = useState(() => notifySettingEnabled(unitId));
+
+  async function toggleNotifications() {
+    if (!('Notification' in window)) return;
+    let allowed = Notification.permission === 'granted';
+    if (!allowed && Notification.permission !== 'denied') {
+      allowed = (await Notification.requestPermission()) === 'granted';
+    }
+    const next = allowed ? !notifyEnabled : false;
+    setNotifyEnabled(next);
+    setNotifySetting(unitId, next);
+  }
 
   return (
     <section className="message-band">
       <div className="message-band-head">
-        <MessageSquare size={18} />
-        <strong>Recados da Rosa</strong>
+        <button className="text-button strong" onClick={() => setExpanded((value) => !value)} type="button">
+          <MessageSquare size={18} />
+          Recados da Rosa
+          {visible.length ? <b>{visible.length} novo(s)</b> : null}
+        </button>
+        <button className={`ghost notify-button ${notifyEnabled ? 'active' : ''}`} onClick={toggleNotifications} type="button">
+          <Bell size={17} /> {notifyEnabled ? 'Avisos ligados' : 'Ativar avisos'}
+        </button>
       </div>
-      <div className="message-list">
-        {visible.map((message) => (
-          <article className="message-card" key={message.id}>
-            <div>
-              <strong>{message.title}</strong>
-              <p>{message.text}</p>
-              <small>{formatShortDate(message.createdAt)}</small>
-            </div>
-            <button className="ghost" onClick={() => onSeen(message.id)} type="button">
-              <Check size={17} /> Visto
-            </button>
-          </article>
-        ))}
-      </div>
+      {expanded ? (
+        <div className="message-list">
+          {messages.length ? (
+            messages.map((message) => (
+              <UnitMessageCard
+                key={message.id}
+                message={message}
+                onReply={onReply}
+                onSeen={onSeen}
+                unitId={unitId}
+              />
+            ))
+          ) : (
+            <p className="empty">Nenhum recado para esta unidade ainda.</p>
+          )}
+        </div>
+      ) : null}
     </section>
+  );
+}
+
+function UnitMessageCard({ message, onReply, onSeen, unitId }) {
+  const [reply, setReply] = useState('');
+  const seen = (message.seenBy || []).includes(unitId);
+  const replies = (message.replies || []).filter((item) => item.unitId === unitId);
+
+  async function submit(event) {
+    event.preventDefault();
+    if (!reply.trim()) return;
+    await onReply(message.id, reply.trim());
+    setReply('');
+  }
+
+  return (
+    <article className={`message-card ${seen ? '' : 'unread'}`}>
+      <div>
+        <strong>{message.title}</strong>
+        <p>{message.text}</p>
+        <small>
+          Enviado {relativeTime(message.createdAt)} · {fullDateTime(message.createdAt)}
+          {message.updatedAt ? ` · editado ${relativeTime(message.updatedAt)}` : ''}
+        </small>
+      </div>
+      <div className="message-card-actions">
+        {!seen ? (
+          <button className="ghost" onClick={() => onSeen(message.id)} type="button">
+            <Check size={17} /> Visto
+          </button>
+        ) : (
+          <span className="seen-pill">visto</span>
+        )}
+      </div>
+      <form className="reply-form" onSubmit={submit}>
+        <input
+          onChange={(event) => setReply(event.target.value)}
+          placeholder="Responder ou perguntar para a Rosa"
+          value={reply}
+        />
+        <button className="primary square" type="submit">
+          <Send size={17} />
+        </button>
+      </form>
+      {replies.length ? (
+        <div className="reply-list">
+          {replies.map((item) => (
+            <p key={item.id}>
+              <strong>{unitName(item.unitId)} perguntou:</strong> {item.text}
+              <small>{relativeTime(item.createdAt)} · {fullDateTime(item.createdAt)}</small>
+            </p>
+          ))}
+        </div>
+      ) : null}
+    </article>
   );
 }
 
@@ -744,6 +998,141 @@ function AdminMessages({ onSendMessage, state }) {
           </p>
         ))}
       </div>
+    </section>
+  );
+}
+
+function MessageHistory({ messages, onDeleteMessage, onUpdateMessage }) {
+  const [open, setOpen] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [draft, setDraft] = useState({ title: '', text: '', targets: [] });
+
+  function startEdit(message) {
+    setEditingId(message.id);
+    setDraft({
+      title: message.title || '',
+      text: message.text || '',
+      targets: message.targets?.length ? message.targets : UNITS.map((unit) => unit.id)
+    });
+  }
+
+  function toggleTarget(unitId) {
+    setDraft((current) => {
+      const targets = current.targets.includes(unitId)
+        ? current.targets.filter((item) => item !== unitId)
+        : [...current.targets, unitId];
+      return { ...current, targets };
+    });
+  }
+
+  async function saveEdit(event) {
+    event.preventDefault();
+    await onUpdateMessage(editingId, {
+      ...draft,
+      targets: draft.targets.length ? draft.targets : UNITS.map((unit) => unit.id)
+    });
+    setEditingId(null);
+  }
+
+  return (
+    <section className="admin-card history-card">
+      <button className="history-toggle" onClick={() => setOpen((value) => !value)} type="button">
+        <span>
+          <MessageSquare size={18} />
+          <strong>Histórico de recados</strong>
+        </span>
+        <b>{messages.length}</b>
+      </button>
+      {open ? (
+        <div className="admin-message-list">
+          {messages.length ? (
+            messages.map((message) => {
+              const isEditing = editingId === message.id;
+              return (
+                <article className="admin-message-card" key={message.id}>
+                  {isEditing ? (
+                    <form className="message-form" onSubmit={saveEdit}>
+                      <input
+                        onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
+                        value={draft.title}
+                      />
+                      <textarea
+                        onChange={(event) => setDraft((current) => ({ ...current, text: event.target.value }))}
+                        value={draft.text}
+                      />
+                      <div className="target-row">
+                        {UNITS.map((unit) => (
+                          <button
+                            className={draft.targets.includes(unit.id) ? 'selected' : ''}
+                            key={unit.id}
+                            onClick={() => toggleTarget(unit.id)}
+                            type="button"
+                          >
+                            {unit.name}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="message-tools">
+                        <button className="ghost" onClick={() => setEditingId(null)} type="button">
+                          Cancelar
+                        </button>
+                        <button className="primary" type="submit">
+                          <Check size={17} /> Salvar
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <>
+                      <div className="admin-message-head">
+                        <div>
+                          <strong>{message.title}</strong>
+                          <p>{message.text}</p>
+                          <small>
+                            Enviado {relativeTime(message.createdAt)} · {fullDateTime(message.createdAt)}
+                            {message.updatedAt ? ` · editado ${relativeTime(message.updatedAt)}` : ''}
+                          </small>
+                        </div>
+                        <div className="message-tools">
+                          <button className="icon-button mini" onClick={() => startEdit(message)} title="Editar recado" type="button">
+                            <Pencil size={16} />
+                          </button>
+                          <button
+                            className="icon-button mini"
+                            onClick={() => onDeleteMessage(message.id)}
+                            title="Apagar recado"
+                            type="button"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="status-grid">
+                        {message.targets.map((unitId) => (
+                          <span className={(message.seenBy || []).includes(unitId) ? 'seen' : ''} key={unitId}>
+                            {unitName(unitId)} · {(message.seenBy || []).includes(unitId) ? 'visto' : 'pendente'}
+                          </span>
+                        ))}
+                      </div>
+                      {(message.replies || []).length ? (
+                        <div className="reply-list admin-replies">
+                          {message.replies.map((reply) => (
+                            <p key={reply.id}>
+                              <strong>{unitName(reply.unitId)} perguntou:</strong> {reply.text}
+                              <small>{relativeTime(reply.createdAt)} · {fullDateTime(reply.createdAt)}</small>
+                            </p>
+                          ))}
+                        </div>
+                      ) : null}
+                    </>
+                  )}
+                </article>
+              );
+            })
+          ) : (
+            <p className="empty">Nenhum recado enviado ainda.</p>
+          )}
+        </div>
+      ) : null}
     </section>
   );
 }

@@ -40,7 +40,7 @@ function doGet(event) {
       ok: true,
       name: 'Unidades API',
       units: UNITS.map((unit) => unit.id),
-      actions: ['loginUnit', 'loginAdmin', 'getState', 'saveUnit', 'sendMessage']
+      actions: ['loginUnit', 'loginAdmin', 'getState', 'saveUnit', 'sendMessage', 'updateMessage', 'deleteMessage', 'replyMessage']
     });
   }
 
@@ -124,6 +124,7 @@ function sendMessageServer(token, message) {
       text: String(message.text || '').trim(),
       targets: cleanTargets,
       seenBy: [],
+      replies: [],
       createdAt: new Date().toISOString()
     },
     ...(state.messages || [])
@@ -132,6 +133,80 @@ function sendMessageServer(token, message) {
   writeState(state);
   mirrorReadableSheets(state);
   return { role: 'admin', state };
+}
+
+function updateMessageServer(token, messageId, patch) {
+  setupWorkbook();
+  const session = assertSession(token);
+  if (session.role !== 'admin') throw new Error('admin_only');
+  const state = readState();
+  ensureStateShape(state);
+  const targets = Array.isArray(patch.targets) && patch.targets.length ? patch.targets : UNITS.map((unit) => unit.id);
+  const cleanTargets = targets.filter((target) => Boolean(getUnitDefinition(target)));
+  state.messages = state.messages.map((message) => {
+    if (message.id !== messageId) return message;
+    return {
+      ...message,
+      title: String(patch.title || message.title || 'Mensagem da Rosa').trim(),
+      text: String(patch.text || '').trim(),
+      targets: cleanTargets,
+      seenBy: [],
+      updatedAt: new Date().toISOString()
+    };
+  });
+  state.updatedAt = new Date().toISOString();
+  writeState(state);
+  mirrorReadableSheets(state);
+  return { role: 'admin', state };
+}
+
+function deleteMessageServer(token, messageId) {
+  setupWorkbook();
+  const session = assertSession(token);
+  if (session.role !== 'admin') throw new Error('admin_only');
+  const state = readState();
+  ensureStateShape(state);
+  state.messages = state.messages.filter((message) => message.id !== messageId);
+  state.updatedAt = new Date().toISOString();
+  writeState(state);
+  mirrorReadableSheets(state);
+  return { role: 'admin', state };
+}
+
+function replyMessageServer(token, messageId, text) {
+  setupWorkbook();
+  const session = assertSession(token);
+  if (session.role !== 'unit') throw new Error('unit_only');
+  const cleanText = String(text || '').trim();
+  if (!cleanText) throw new Error('empty_reply');
+  const state = readState();
+  ensureStateShape(state);
+  state.messages = state.messages.map((message) => {
+    if (message.id !== messageId) return message;
+    if (!(message.targets || []).includes(session.unitId)) throw new Error('forbidden_message');
+    return {
+      ...message,
+      replies: [
+        {
+          id: `reply_${Utilities.getUuid()}`,
+          unitId: session.unitId,
+          text: cleanText,
+          createdAt: new Date().toISOString()
+        },
+        ...(message.replies || [])
+      ].slice(0, 80),
+      updatedAt: new Date().toISOString()
+    };
+  });
+  state.updatedAt = new Date().toISOString();
+  writeState(state);
+  mirrorReadableSheets(state);
+  return {
+    role: 'unit',
+    unitId: session.unitId,
+    unit: state.units[session.unitId],
+    messages: messagesForUnit(state, session.unitId)
+  };
 }
 
 function markMessageSeenServer(token, messageId) {
@@ -227,8 +302,8 @@ function setupWorkbook() {
     .setFontWeight('bold');
 
   spreadsheet.getSheetByName(MESSAGES_SHEET)
-    .getRange('A1:F1')
-    .setValues([['id', 'title', 'text', 'targets', 'seenBy', 'createdAt']])
+    .getRange('A1:H1')
+    .setValues([['id', 'title', 'text', 'targets', 'seenBy', 'replies', 'createdAt', 'updatedAt']])
     .setFontWeight('bold');
 
   spreadsheet.getSheetByName(ACTIVITY_SHEET)
@@ -309,13 +384,15 @@ function mirrorReadableSheets(state) {
     message.text,
     (message.targets || []).join(', '),
     (message.seenBy || []).join(', '),
-    message.createdAt || ''
+    JSON.stringify(message.replies || []),
+    message.createdAt || '',
+    message.updatedAt || ''
   ]);
 
   replaceRows(spreadsheet.getSheetByName(UNITS_SHEET), unitsRows, 5);
   replaceRows(spreadsheet.getSheetByName(DOCUMENTS_SHEET), documentRows, 9);
   replaceRows(spreadsheet.getSheetByName(TASKS_SHEET), taskRows, 10);
-  replaceRows(spreadsheet.getSheetByName(MESSAGES_SHEET), messageRows, 6);
+  replaceRows(spreadsheet.getSheetByName(MESSAGES_SHEET), messageRows, 8);
   replaceRows(spreadsheet.getSheetByName(ACTIVITY_SHEET), activityRows, 5);
 }
 
@@ -335,6 +412,12 @@ function ensureStateShape(state) {
   state.settings.adminUser = state.settings.adminUser || 'rosa';
   state.settings.adminPassword = state.settings.adminPassword || 'gass';
   state.messages = Array.isArray(state.messages) ? state.messages : [];
+  state.messages = state.messages.map((message) => ({
+    ...message,
+    targets: Array.isArray(message.targets) ? message.targets : [],
+    seenBy: Array.isArray(message.seenBy) ? message.seenBy : [],
+    replies: Array.isArray(message.replies) ? message.replies : []
+  }));
   state.units = state.units || {};
   UNITS.forEach((unit) => {
     state.units[unit.id] = normalizeUnitState(unit.id, state.units[unit.id] || {});

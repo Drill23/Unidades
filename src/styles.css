@@ -639,20 +639,6 @@ label {
   justify-content: space-between;
 }
 
-.notify-button.active {
-  background: #dff3e5;
-  color: #27643e;
-}
-
-.notify-status {
-  background: rgba(255, 255, 255, 0.62);
-  border: 1px solid rgba(29, 42, 46, 0.08);
-  border-radius: 8px;
-  color: #637276;
-  font-size: 0.86rem;
-  padding: 8px 10px;
-}
-
 .message-list {
   display: grid;
   gap: 8px;
@@ -674,9 +660,21 @@ label {
   background: #fff4df;
 }
 
+.message-card.from-unit,
+.admin-message-card.from-unit {
+  background: #f7faf9;
+  border-left-color: #5d8aa8;
+}
+
 .message-card p,
 .message-card small {
   color: #637276;
+}
+
+.unit-message-form {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(140px, 0.6fr) minmax(180px, 1fr) auto;
 }
 
 .message-card-actions {
@@ -1107,6 +1105,10 @@ label {
   .message-band-head {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .unit-message-form {
+    grid-template-columns: 1fr;
   }
 
   .admin-message-head {

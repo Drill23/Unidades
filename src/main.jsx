@@ -24,7 +24,6 @@ import {
   ShieldCheck,
   Trash2,
   Undo2,
-  Bell,
   Users,
   X
 } from 'lucide-react';
@@ -32,7 +31,6 @@ import './styles.css';
 
 const STORAGE_KEY = 'unidades-state';
 const SESSION_KEY = 'unidades-session';
-const NOTIFY_KEY = 'unidades-notifications';
 const COLORS = ['#69b578', '#e0a458', '#5d8aa8', '#d96570', '#7b6bb7'];
 const UNITS = [
   { id: 'jaguapita', name: 'Jaguapitã', password: 'jaguapita', accent: '#69b578' },
@@ -92,7 +90,9 @@ function normalizeMessage(message) {
     ...message,
     targets: Array.isArray(message.targets) ? message.targets : [],
     seenBy: Array.isArray(message.seenBy) ? message.seenBy : [],
-    replies: Array.isArray(message.replies) ? message.replies : []
+    replies: Array.isArray(message.replies) ? message.replies : [],
+    from: message.from || 'rosa',
+    fromUnitId: message.fromUnitId || ''
   };
 }
 
@@ -203,6 +203,8 @@ async function localCall(functionName, ...args) {
           targets,
           seenBy: [],
           replies: [],
+          from: 'rosa',
+          fromUnitId: '',
           createdAt: isoNow()
         },
         ...state.messages
@@ -210,6 +212,38 @@ async function localCall(functionName, ...args) {
     });
     writeLocalState(next);
     return { role: 'admin', state: next };
+  }
+
+  if (functionName === 'sendUnitMessageServer') {
+    const [, message] = args;
+    if (session.role !== 'unit') throw new Error('Apenas a unidade pode enviar mensagem');
+    const text = String(message.text || '').trim();
+    if (!text) throw new Error('Mensagem vazia');
+    const next = normalizeState({
+      ...state,
+      updatedAt: isoNow(),
+      messages: [
+        {
+          id: uid('msg'),
+          title: message.title || 'Mensagem da unidade',
+          text,
+          targets: [session.unitId],
+          seenBy: [],
+          replies: [],
+          from: 'unit',
+          fromUnitId: session.unitId,
+          createdAt: isoNow()
+        },
+        ...state.messages
+      ].slice(0, 250)
+    });
+    writeLocalState(next);
+    return {
+      role: 'unit',
+      unitId: session.unitId,
+      unit: next.units[session.unitId],
+      messages: messagesForUnit(next, session.unitId)
+    };
   }
 
   if (functionName === 'updateMessageServer') {
@@ -220,15 +254,8 @@ async function localCall(functionName, ...args) {
       ...state,
       updatedAt: isoNow(),
       messages: state.messages.map((message) =>
-        message.id === messageId
-          ? {
-              ...message,
-              title: patch.title || message.title,
-              text: patch.text || '',
-              targets,
-              seenBy: [],
-              updatedAt: isoNow()
-            }
+        message.id === messageId && message.from !== 'unit'
+          ? { ...message, title: patch.title || message.title, text: patch.text || '', targets, seenBy: [], updatedAt: isoNow() }
           : message
       )
     });
@@ -254,14 +281,14 @@ async function localCall(functionName, ...args) {
       updatedAt: isoNow(),
       messages: state.messages.map((message) => {
         if (message.id !== messageId) return message;
+        if (message.from === 'unit') throw new Error('Não é possível responder uma mensagem avulsa da unidade');
         if (!message.targets.includes(session.unitId)) throw new Error('Recado não pertence à unidade');
         return {
           ...message,
           replies: [
             { id: uid('reply'), unitId: session.unitId, text: cleanText, createdAt: isoNow() },
             ...(message.replies || [])
-          ],
-          updatedAt: isoNow()
+          ]
         };
       })
     });
@@ -368,29 +395,6 @@ function messagesForUnit(state, unitId) {
   return (state.messages || []).filter((message) => (message.targets || []).includes(unitId));
 }
 
-function getNotifyMode(unitId) {
-  try {
-    const settings = JSON.parse(localStorage.getItem(NOTIFY_KEY)) || {};
-    const value = settings[unitId];
-    if (value === true) return 'browser';
-    if (value === 'browser' || value === 'in-app') return value;
-    return '';
-  } catch {
-    return '';
-  }
-}
-
-function setNotifySetting(unitId, mode) {
-  const settings = (() => {
-    try {
-      return JSON.parse(localStorage.getItem(NOTIFY_KEY)) || {};
-    } catch {
-      return {};
-    }
-  })();
-  localStorage.setItem(NOTIFY_KEY, JSON.stringify({ ...settings, [unitId]: mode }));
-}
-
 function relativeTime(value) {
   if (!value) return 'sem data';
   const date = new Date(value);
@@ -441,7 +445,6 @@ function App() {
   const [unitMessages, setUnitMessages] = useState([]);
   const [syncMode, setSyncMode] = useState('carregando');
   const [loginError, setLoginError] = useState('');
-  const notifiedMessages = useRef(new Set());
   const refreshRef = useRef(null);
 
   useEffect(() => {
@@ -483,27 +486,6 @@ function App() {
       clearInterval(refreshRef.current);
     };
   }, [session]);
-
-  useEffect(() => {
-    if (session?.role !== 'unit') return;
-    if (!('Notification' in window)) return;
-    if (getNotifyMode(session.unitId) !== 'browser' || Notification.permission !== 'granted') return;
-    unitMessages
-      .filter((message) => !(message.seenBy || []).includes(session.unitId))
-      .forEach((message) => {
-        const marker = `${session.unitId}:${message.id}:${message.updatedAt || message.createdAt}`;
-        if (notifiedMessages.current.has(marker)) return;
-        notifiedMessages.current.add(marker);
-        try {
-          new Notification(`Recado da Rosa para ${unitName(session.unitId)}`, {
-            body: message.title || message.text,
-            tag: marker
-          });
-        } catch {
-          setNotifySetting(session.unitId, 'in-app');
-        }
-      });
-  }, [session, unitMessages]);
 
   async function loginUnit(unitId, password) {
     setLoginError('');
@@ -598,6 +580,12 @@ function App() {
     setUnitMessages(response.messages || []);
   }
 
+  async function sendUnitMessage(message) {
+    const response = await serverCall('sendUnitMessageServer', session.token, message);
+    setUnitState(response.unit);
+    setUnitMessages(response.messages || []);
+  }
+
   async function changeAdminPassword(currentPassword, nextPassword) {
     const response = await serverCall('updateAdminPasswordServer', session.token, currentPassword, nextPassword);
     setAppState(normalizeState(response.state));
@@ -633,6 +621,7 @@ function App() {
       onLogout={logout}
       onMarkMessageSeen={markMessageSeen}
       onReplyMessage={replyMessage}
+      onSendUnitMessage={sendUnitMessage}
       onSaveUnit={saveUnit}
     />
   );
@@ -735,7 +724,18 @@ function AccessGate({ error, onAdminLogin, onUnitLogin }) {
   );
 }
 
-function UnitApp({ messages, onEmptyTrash, onLogout, onMarkMessageSeen, onReplyMessage, onSaveUnit, syncMode, unit, unitId }) {
+function UnitApp({
+  messages,
+  onEmptyTrash,
+  onLogout,
+  onMarkMessageSeen,
+  onReplyMessage,
+  onSendUnitMessage,
+  onSaveUnit,
+  syncMode,
+  unit,
+  unitId
+}) {
   return (
     <main className="shell">
       <Topbar
@@ -744,7 +744,13 @@ function UnitApp({ messages, onEmptyTrash, onLogout, onMarkMessageSeen, onReplyM
         syncMode={syncMode}
         title={unitName(unitId)}
       />
-      <UnitMessages messages={messages} onReply={onReplyMessage} onSeen={onMarkMessageSeen} unitId={unitId} />
+      <UnitMessages
+        messages={messages}
+        onReply={onReplyMessage}
+        onSeen={onMarkMessageSeen}
+        onSendUnitMessage={onSendUnitMessage}
+        unitId={unitId}
+      />
       <DocumentWorkspace
         mode="unit"
         onEmptyTrash={onEmptyTrash}
@@ -768,6 +774,7 @@ function AdminApp({
 }) {
   const [selectedUnitId, setSelectedUnitId] = useState(UNITS[0].id);
   const selectedUnit = state.units[selectedUnitId] || emptyUnit(UNITS[0]);
+  const selectedMessages = state.messages.filter((message) => (message.targets || []).includes(selectedUnitId) || message.fromUnitId === selectedUnitId);
 
   return (
     <main className="shell admin-shell">
@@ -778,11 +785,12 @@ function AdminApp({
           <PasswordPanel onChangePassword={onChangeAdminPassword} />
         </aside>
         <section className="admin-comms">
-          <AdminMessages state={state} onSendMessage={onSendMessage} />
+          <AdminMessages selectedUnitId={selectedUnitId} state={state} onSendMessage={onSendMessage} />
           <MessageHistory
-            messages={state.messages}
+            messages={selectedMessages}
             onDeleteMessage={onDeleteMessage}
             onUpdateMessage={onUpdateMessage}
+            selectedUnitId={selectedUnitId}
           />
         </section>
       </section>
@@ -815,79 +823,41 @@ function Topbar({ eyebrow, onLogout, syncMode, title }) {
   );
 }
 
-function UnitMessages({ messages, onReply, onSeen, unitId }) {
-  const visible = messages.filter((message) => !(message.seenBy || []).includes(unitId));
+function UnitMessages({ messages, onReply, onSeen, onSendUnitMessage, unitId }) {
+  const rosaMessages = messages.filter((message) => message.from !== 'unit');
+  const visible = rosaMessages.filter((message) => !(message.seenBy || []).includes(unitId));
   const [expanded, setExpanded] = useState(Boolean(visible.length));
-  const [notifyMode, setNotifyMode] = useState(() => getNotifyMode(unitId));
-  const [notifyStatus, setNotifyStatus] = useState(() => {
-    const mode = getNotifyMode(unitId);
-    if (mode === 'browser') return 'Avisos do aparelho ligados para esta unidade.';
-    if (mode === 'in-app') return 'Avisos internos ligados para esta unidade.';
-    return '';
-  });
+  const [title, setTitle] = useState('');
+  const [text, setText] = useState('');
 
-  async function toggleNotifications() {
-    if (notifyMode) {
-      setNotifyMode('');
-      setNotifySetting(unitId, '');
-      setNotifyStatus('Avisos desligados para esta unidade.');
-      return;
-    }
-
-    if (!('Notification' in window) || !window.isSecureContext) {
-      setNotifyMode('in-app');
-      setNotifySetting(unitId, 'in-app');
-      setNotifyStatus('Seu navegador não liberou aviso do aparelho. Deixei o aviso interno ligado.');
-      return;
-    }
-
-    try {
-      let allowed = Notification.permission === 'granted';
-      if (!allowed && Notification.permission !== 'denied') {
-        setNotifyStatus('Pedindo permissão ao navegador...');
-        const permission = await Promise.race([
-          Notification.requestPermission(),
-          new Promise((resolve) => {
-            setTimeout(() => resolve('timeout'), 1400);
-          })
-        ]);
-        allowed = permission === 'granted';
-      }
-
-      if (allowed) {
-        setNotifyMode('browser');
-        setNotifySetting(unitId, 'browser');
-        setNotifyStatus('Avisos do aparelho ligados para esta unidade.');
-        return;
-      }
-    } catch {
-      // Fall back to in-app notices below.
-    }
-
-    setNotifyMode('in-app');
-    setNotifySetting(unitId, 'in-app');
-    setNotifyStatus('O navegador bloqueou o aviso do aparelho. Deixei o aviso interno ligado.');
+  async function submit(event) {
+    event.preventDefault();
+    if (!text.trim()) return;
+    await onSendUnitMessage({
+      title: title.trim() || 'Mensagem da unidade',
+      text: text.trim()
+    });
+    setTitle('');
+    setText('');
+    setExpanded(true);
   }
-
-  const notifyLabel = notifyMode === 'browser'
-    ? 'Avisos do aparelho'
-    : notifyMode === 'in-app'
-      ? 'Avisos no app'
-      : 'Ativar avisos';
 
   return (
     <section className="message-band">
       <div className="message-band-head">
         <button className="text-button strong" onClick={() => setExpanded((value) => !value)} type="button">
           <MessageSquare size={18} />
-          Recados da Rosa
+          Conversa com a Rosa
           {visible.length ? <b>{visible.length} novo(s)</b> : null}
         </button>
-        <button className={`ghost notify-button ${notifyMode ? 'active' : ''}`} onClick={toggleNotifications} type="button">
-          <Bell size={17} /> {notifyLabel}
-        </button>
       </div>
-      {notifyStatus ? <p className="notify-status">{notifyStatus}</p> : null}
+      <form className="unit-message-form" onSubmit={submit}>
+        <input onChange={(event) => setTitle(event.target.value)} placeholder="Assunto para Rosa" value={title} />
+        <input onChange={(event) => setText(event.target.value)} placeholder="Mensagem nova para Rosa" value={text} />
+        <button className="primary" type="submit">
+          <Send size={17} /> Enviar
+        </button>
+      </form>
       {expanded ? (
         <div className="message-list">
           {messages.length ? (
@@ -901,7 +871,7 @@ function UnitMessages({ messages, onReply, onSeen, unitId }) {
               />
             ))
           ) : (
-            <p className="empty">Nenhum recado para esta unidade ainda.</p>
+            <p className="empty">Nenhuma conversa com a Rosa ainda.</p>
           )}
         </div>
       ) : null}
@@ -912,6 +882,7 @@ function UnitMessages({ messages, onReply, onSeen, unitId }) {
 function UnitMessageCard({ message, onReply, onSeen, unitId }) {
   const [reply, setReply] = useState('');
   const seen = (message.seenBy || []).includes(unitId);
+  const fromUnit = message.from === 'unit';
   const replies = (message.replies || []).filter((item) => item.unitId === unitId);
 
   async function submit(event) {
@@ -922,17 +893,19 @@ function UnitMessageCard({ message, onReply, onSeen, unitId }) {
   }
 
   return (
-    <article className={`message-card ${seen ? '' : 'unread'}`}>
+    <article className={`message-card ${fromUnit ? 'from-unit' : seen ? '' : 'unread'}`}>
       <div>
-        <strong>{message.title}</strong>
+        <strong>{fromUnit ? `Você enviou: ${message.title}` : message.title}</strong>
         <p>{message.text}</p>
         <small>
-          Enviado {relativeTime(message.createdAt)} · {fullDateTime(message.createdAt)}
+          {fromUnit ? 'Enviado para Rosa' : 'Rosa enviou'} {relativeTime(message.createdAt)} · {fullDateTime(message.createdAt)}
           {message.updatedAt ? ` · editado ${relativeTime(message.updatedAt)}` : ''}
         </small>
       </div>
       <div className="message-card-actions">
-        {!seen ? (
+        {fromUnit ? (
+          <span className="seen-pill">enviado</span>
+        ) : !seen ? (
           <button className="ghost" onClick={() => onSeen(message.id)} type="button">
             <Check size={17} /> Visto
           </button>
@@ -940,16 +913,18 @@ function UnitMessageCard({ message, onReply, onSeen, unitId }) {
           <span className="seen-pill">visto</span>
         )}
       </div>
-      <form className="reply-form" onSubmit={submit}>
-        <input
-          onChange={(event) => setReply(event.target.value)}
-          placeholder="Responder ou perguntar para a Rosa"
-          value={reply}
-        />
-        <button className="primary square" type="submit">
-          <Send size={17} />
-        </button>
-      </form>
+      {!fromUnit ? (
+        <form className="reply-form" onSubmit={submit}>
+          <input
+            onChange={(event) => setReply(event.target.value)}
+            placeholder="Responder esta mensagem da Rosa"
+            value={reply}
+          />
+          <button className="primary square" type="submit">
+            <Send size={17} />
+          </button>
+        </form>
+      ) : null}
       {replies.length ? (
         <div className="reply-list">
           {replies.map((item) => (
@@ -997,7 +972,7 @@ function AdminSummary({ onSelect, selectedUnitId, state }) {
   );
 }
 
-function AdminMessages({ onSendMessage, state }) {
+function AdminMessages({ onSendMessage, selectedUnitId, state }) {
   const [title, setTitle] = useState('');
   const [text, setText] = useState('');
   const [targets, setTargets] = useState(() => UNITS.map((unit) => unit.id));
@@ -1047,7 +1022,10 @@ function AdminMessages({ onSendMessage, state }) {
         </button>
       </form>
       <div className="sent-log">
-        {state.messages.slice(0, 4).map((message) => (
+        {state.messages
+          .filter((message) => message.from !== 'unit' && (message.targets || []).includes(selectedUnitId))
+          .slice(0, 4)
+          .map((message) => (
           <p key={message.id}>
             <strong>{message.title}</strong>
             <span>{(message.seenBy || []).length}/{message.targets.length} viram</span>
@@ -1058,7 +1036,7 @@ function AdminMessages({ onSendMessage, state }) {
   );
 }
 
-function MessageHistory({ messages, onDeleteMessage, onUpdateMessage }) {
+function MessageHistory({ messages, onDeleteMessage, onUpdateMessage, selectedUnitId }) {
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [draft, setDraft] = useState({ title: '', text: '', targets: [] });
@@ -1095,7 +1073,7 @@ function MessageHistory({ messages, onDeleteMessage, onUpdateMessage }) {
       <button className="history-toggle" onClick={() => setOpen((value) => !value)} type="button">
         <span>
           <MessageSquare size={18} />
-          <strong>Histórico de recados</strong>
+          <strong>Mensagens de {unitName(selectedUnitId)}</strong>
         </span>
         <b>{messages.length}</b>
       </button>
@@ -1104,8 +1082,9 @@ function MessageHistory({ messages, onDeleteMessage, onUpdateMessage }) {
           {messages.length ? (
             messages.map((message) => {
               const isEditing = editingId === message.id;
+              const fromUnit = message.from === 'unit';
               return (
-                <article className="admin-message-card" key={message.id}>
+                <article className={`admin-message-card ${fromUnit ? 'from-unit' : ''}`} key={message.id}>
                   {isEditing ? (
                     <form className="message-form" onSubmit={saveEdit}>
                       <input
@@ -1141,17 +1120,19 @@ function MessageHistory({ messages, onDeleteMessage, onUpdateMessage }) {
                     <>
                       <div className="admin-message-head">
                         <div>
-                          <strong>{message.title}</strong>
+                          <strong>{fromUnit ? `${unitName(message.fromUnitId)} enviou: ${message.title}` : `Rosa enviou: ${message.title}`}</strong>
                           <p>{message.text}</p>
                           <small>
-                            Enviado {relativeTime(message.createdAt)} · {fullDateTime(message.createdAt)}
+                            {fromUnit ? 'Mensagem avulsa recebida' : 'Recado enviado'} {relativeTime(message.createdAt)} · {fullDateTime(message.createdAt)}
                             {message.updatedAt ? ` · editado ${relativeTime(message.updatedAt)}` : ''}
                           </small>
                         </div>
                         <div className="message-tools">
-                          <button className="icon-button mini" onClick={() => startEdit(message)} title="Editar recado" type="button">
-                            <Pencil size={16} />
-                          </button>
+                          {!fromUnit ? (
+                            <button className="icon-button mini" onClick={() => startEdit(message)} title="Editar recado" type="button">
+                              <Pencil size={16} />
+                            </button>
+                          ) : null}
                           <button
                             className="icon-button mini"
                             onClick={() => onDeleteMessage(message.id)}
@@ -1162,21 +1143,25 @@ function MessageHistory({ messages, onDeleteMessage, onUpdateMessage }) {
                           </button>
                         </div>
                       </div>
-                      <div className="status-grid">
-                        {message.targets.map((unitId) => (
-                          <span className={(message.seenBy || []).includes(unitId) ? 'seen' : ''} key={unitId}>
-                            {unitName(unitId)} · {(message.seenBy || []).includes(unitId) ? 'visto' : 'pendente'}
-                          </span>
-                        ))}
-                      </div>
-                      {(message.replies || []).length ? (
-                        <div className="reply-list admin-replies">
-                          {message.replies.map((reply) => (
-                            <p key={reply.id}>
-                              <strong>{unitName(reply.unitId)} perguntou:</strong> {reply.text}
-                              <small>{relativeTime(reply.createdAt)} · {fullDateTime(reply.createdAt)}</small>
-                            </p>
+                      {!fromUnit ? (
+                        <div className="status-grid">
+                          {message.targets.map((unitId) => (
+                            <span className={(message.seenBy || []).includes(unitId) ? 'seen' : ''} key={unitId}>
+                              {unitName(unitId)} · {(message.seenBy || []).includes(unitId) ? 'visto' : 'pendente'}
+                            </span>
                           ))}
+                        </div>
+                      ) : null}
+                      {(message.replies || []).filter((reply) => reply.unitId === selectedUnitId).length ? (
+                        <div className="reply-list admin-replies">
+                          {message.replies
+                            .filter((reply) => reply.unitId === selectedUnitId)
+                            .map((reply) => (
+                              <p key={reply.id}>
+                                <strong>{unitName(reply.unitId)} respondeu esse recado:</strong> {reply.text}
+                                <small>{relativeTime(reply.createdAt)} · {fullDateTime(reply.createdAt)}</small>
+                              </p>
+                            ))}
                         </div>
                       ) : null}
                     </>
@@ -1185,7 +1170,7 @@ function MessageHistory({ messages, onDeleteMessage, onUpdateMessage }) {
               );
             })
           ) : (
-            <p className="empty">Nenhum recado enviado ainda.</p>
+            <p className="empty">Nenhuma mensagem desta unidade ainda.</p>
           )}
         </div>
       ) : null}

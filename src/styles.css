@@ -208,16 +208,20 @@ label {
 }
 
 .shell {
-  padding: 18px;
+  padding: 14px;
 }
 
 .topbar {
   align-items: center;
   display: grid;
-  gap: 18px;
+  gap: 12px;
   grid-template-columns: minmax(0, 1fr) auto auto;
-  margin: 0 auto 18px;
+  margin: 0 auto 12px;
   max-width: 1480px;
+}
+
+.admin-shell .topbar h1 {
+  font-size: clamp(1.8rem, 3vw, 2.8rem);
 }
 
 .eyebrow {
@@ -315,9 +319,9 @@ label {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
   justify-content: flex-end;
-  margin: 0 auto 16px;
+  margin: 0 auto 10px;
   max-width: 1280px;
 }
 
@@ -350,7 +354,7 @@ label {
 
 .workspace {
   display: grid;
-  gap: 18px;
+  gap: 12px;
   grid-template-columns: 320px minmax(0, 1fr);
   margin: 0 auto;
   max-width: 1280px;
@@ -448,9 +452,9 @@ label {
 
 .detail-card {
   display: grid;
-  gap: 22px;
-  min-height: 640px;
-  padding: clamp(18px, 3vw, 34px);
+  gap: 16px;
+  align-content: start;
+  padding: clamp(16px, 2.4vw, 26px);
 }
 
 .detail-head {
@@ -461,7 +465,7 @@ label {
 }
 
 .detail-head h2 {
-  font-size: clamp(2rem, 4vw, 4rem);
+  font-size: clamp(2rem, 3.5vw, 3.35rem);
   line-height: 0.98;
   overflow-wrap: anywhere;
 }
@@ -514,8 +518,8 @@ label {
   border: 1px solid rgba(29, 42, 46, 0.09);
   border-radius: 10px;
   display: grid;
-  gap: 14px;
-  padding: 16px;
+  gap: 12px;
+  padding: 14px;
 }
 
 .section-title {
@@ -618,17 +622,17 @@ label {
   color: #637276;
   display: grid;
   justify-items: center;
-  min-height: 520px;
-  padding: 30px;
+  min-height: 320px;
+  padding: 24px;
   text-align: center;
 }
 
 .message-band {
   display: grid;
-  gap: 12px;
-  margin: 0 auto 16px;
+  gap: 10px;
+  margin: 0 auto 10px;
   max-width: 1280px;
-  padding: 14px;
+  padding: 10px 12px;
 }
 
 .message-band-head {
@@ -642,18 +646,19 @@ label {
 
 .message-list {
   display: grid;
-  gap: 10px;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
 }
 
 .message-card {
-  align-items: center;
+  align-items: start;
   background: #fffaf0;
   border-left: 4px solid #e0a458;
   border-radius: 8px;
   display: grid;
   gap: 10px;
   grid-template-columns: minmax(0, 1fr) auto;
-  padding: 12px;
+  padding: 10px;
 }
 
 .message-card.unread {
@@ -705,23 +710,30 @@ label {
   padding: 9px 10px;
 }
 
-.admin-grid {
+.admin-panel {
   display: grid;
-  gap: 14px;
-  grid-template-columns: 1fr 1.2fr 1fr;
-  margin: 0 auto 18px;
+  gap: 12px;
+  grid-template-columns: 310px minmax(0, 1fr);
+  margin: 0 auto 12px;
   max-width: 1280px;
+}
+
+.admin-side,
+.admin-comms {
+  align-content: start;
+  display: grid;
+  gap: 12px;
 }
 
 .admin-card {
   display: grid;
-  gap: 14px;
-  padding: 16px;
+  gap: 12px;
+  padding: 14px;
 }
 
 .summary-list {
   display: grid;
-  gap: 8px;
+  gap: 5px;
 }
 
 .summary-row {
@@ -733,14 +745,20 @@ label {
   display: grid;
   gap: 10px;
   grid-template-columns: 1fr auto;
-  padding: 11px;
+  min-height: 44px;
+  padding: 7px 10px;
   text-align: left;
+}
+
+.summary-card {
+  padding: 12px;
 }
 
 .summary-row small,
 .sent-log span {
   color: #637276;
   display: block;
+  font-size: 0.78rem;
 }
 
 .target-row {
@@ -753,23 +771,33 @@ label {
   grid-template-columns: 1fr;
 }
 
+.message-form textarea {
+  min-height: 72px;
+}
+
 .sent-log {
   display: grid;
-  gap: 7px;
+  gap: 6px;
+  max-height: 100px;
+  overflow: auto;
 }
 
 .sent-log p {
+  background: rgba(255, 255, 255, 0.54);
+  border-radius: 8px;
   display: flex;
   gap: 12px;
   justify-content: space-between;
+  padding: 7px 9px;
 }
 
 .password-card {
   align-self: start;
+  padding: 12px 14px;
 }
 
-.history-card {
-  grid-column: 1 / -1;
+.password-card input {
+  min-height: 38px;
 }
 
 .history-toggle {
@@ -792,7 +820,8 @@ label {
 
 .admin-message-list {
   display: grid;
-  gap: 10px;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
 }
 
 .admin-message-card {
@@ -800,8 +829,8 @@ label {
   border: 1px solid rgba(29, 42, 46, 0.1);
   border-radius: 8px;
   display: grid;
-  gap: 12px;
-  padding: 12px;
+  gap: 10px;
+  padding: 10px;
 }
 
 .admin-message-head {
@@ -843,8 +872,23 @@ label {
 }
 
 .admin-workspace-title {
-  margin: 0 auto 10px;
+  display: block;
+  margin: 0 auto 8px;
   max-width: 1280px;
+}
+
+.admin-workspace-title h2 {
+  font-size: 1.45rem;
+}
+
+@media (min-width: 981px) {
+  .admin-shell .admin-workspace-title {
+    min-height: 58px;
+  }
+
+  .admin-shell .stats-row {
+    margin-top: -58px;
+  }
 }
 
 .modal-backdrop {
@@ -899,7 +943,7 @@ label {
     grid-template-columns: 1fr auto auto;
   }
 
-  .admin-grid {
+  .admin-panel {
     grid-template-columns: 1fr;
   }
 
@@ -939,7 +983,7 @@ label {
   }
 
   .detail-card {
-    min-height: calc(100vh - 150px);
+    min-height: 0;
   }
 }
 

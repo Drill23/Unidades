@@ -765,15 +765,19 @@ function AdminApp({
   return (
     <main className="shell admin-shell">
       <Topbar eyebrow="Painel da Rosa" onLogout={onLogout} syncMode={syncMode} title="Acompanhamento das unidades" />
-      <section className="admin-grid">
-        <AdminSummary selectedUnitId={selectedUnitId} state={state} onSelect={setSelectedUnitId} />
-        <AdminMessages state={state} onSendMessage={onSendMessage} />
-        <MessageHistory
-          messages={state.messages}
-          onDeleteMessage={onDeleteMessage}
-          onUpdateMessage={onUpdateMessage}
-        />
-        <PasswordPanel onChangePassword={onChangeAdminPassword} />
+      <section className="admin-panel">
+        <aside className="admin-side">
+          <AdminSummary selectedUnitId={selectedUnitId} state={state} onSelect={setSelectedUnitId} />
+          <PasswordPanel onChangePassword={onChangeAdminPassword} />
+        </aside>
+        <section className="admin-comms">
+          <AdminMessages state={state} onSendMessage={onSendMessage} />
+          <MessageHistory
+            messages={state.messages}
+            onDeleteMessage={onDeleteMessage}
+            onUpdateMessage={onUpdateMessage}
+          />
+        </section>
       </section>
       <div className="admin-workspace-title">
         <span className="eyebrow">Unidade em acompanhamento</span>
@@ -1138,6 +1142,7 @@ function MessageHistory({ messages, onDeleteMessage, onUpdateMessage }) {
 }
 
 function PasswordPanel({ onChangePassword }) {
+  const [open, setOpen] = useState(false);
   const [currentPassword, setCurrentPassword] = useState('');
   const [nextPassword, setNextPassword] = useState('');
   const [status, setStatus] = useState('');
@@ -1157,28 +1162,35 @@ function PasswordPanel({ onChangePassword }) {
 
   return (
     <section className="admin-card password-card">
-      <div className="section-title">
-        <Settings size={18} />
-        <h2>Acesso da Rosa</h2>
-      </div>
-      <form className="password-form" onSubmit={submit}>
-        <input
-          onChange={(event) => setCurrentPassword(event.target.value)}
-          placeholder="senha atual"
-          type="password"
-          value={currentPassword}
-        />
-        <input
-          onChange={(event) => setNextPassword(event.target.value)}
-          placeholder="nova senha"
-          type="password"
-          value={nextPassword}
-        />
-        <button className="ghost" type="submit">
-          Alterar
-        </button>
-      </form>
-      {status ? <small>{status}</small> : null}
+      <button className="history-toggle" onClick={() => setOpen((value) => !value)} type="button">
+        <span>
+          <Settings size={18} />
+          <strong>Acesso da Rosa</strong>
+        </span>
+        <b>{open ? 'fechar' : 'abrir'}</b>
+      </button>
+      {open ? (
+        <>
+          <form className="password-form" onSubmit={submit}>
+            <input
+              onChange={(event) => setCurrentPassword(event.target.value)}
+              placeholder="senha atual"
+              type="password"
+              value={currentPassword}
+            />
+            <input
+              onChange={(event) => setNextPassword(event.target.value)}
+              placeholder="nova senha"
+              type="password"
+              value={nextPassword}
+            />
+            <button className="ghost" type="submit">
+              Alterar
+            </button>
+          </form>
+          {status ? <small>{status}</small> : null}
+        </>
+      ) : null}
     </section>
   );
 }

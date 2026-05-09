@@ -4,7 +4,7 @@ Sistema de registros de documentos separado por unidade, com banco em Google She
 
 ## Links
 
-- App publicado: https://script.google.com/macros/s/AKfycbz8Scl29jEDdM9cTmJbTHvo5GesYCvVThL16TQmZsmM9UWVzORPbjZ-B2kBGOZk3O5_/exec
+- App publicado: https://script.google.com/macros/s/AKfycbxM8e4J84zajylQWMXT06ThnVhyuT71tdkhU7qTkL0lmh2LY3Z8o6r9Wvjv1ykKVo6H/exec
 - Planilha banco de dados: https://drive.google.com/open?id=1xFwY5UEs0nkUvz7we3WFlrRjfoEQsIHezZlP2k7rHeM
 - Projeto Apps Script: https://script.google.com/d/10TCgouVk5KqrtKv7QjgVbTt1ZM0XHoyv1-Y_2sky6jcYDTfjTwRV25gx/edit
 

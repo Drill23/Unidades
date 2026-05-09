@@ -644,6 +644,15 @@ label {
   color: #27643e;
 }
 
+.notify-status {
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(29, 42, 46, 0.08);
+  border-radius: 8px;
+  color: #637276;
+  font-size: 0.86rem;
+  padding: 8px 10px;
+}
+
 .message-list {
   display: grid;
   gap: 8px;

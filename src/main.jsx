@@ -368,16 +368,19 @@ function messagesForUnit(state, unitId) {
   return (state.messages || []).filter((message) => (message.targets || []).includes(unitId));
 }
 
-function notifySettingEnabled(unitId) {
+function getNotifyMode(unitId) {
   try {
     const settings = JSON.parse(localStorage.getItem(NOTIFY_KEY)) || {};
-    return Boolean(settings[unitId]);
+    const value = settings[unitId];
+    if (value === true) return 'browser';
+    if (value === 'browser' || value === 'in-app') return value;
+    return '';
   } catch {
-    return false;
+    return '';
   }
 }
 
-function setNotifySetting(unitId, enabled) {
+function setNotifySetting(unitId, mode) {
   const settings = (() => {
     try {
       return JSON.parse(localStorage.getItem(NOTIFY_KEY)) || {};
@@ -385,7 +388,7 @@ function setNotifySetting(unitId, enabled) {
       return {};
     }
   })();
-  localStorage.setItem(NOTIFY_KEY, JSON.stringify({ ...settings, [unitId]: enabled }));
+  localStorage.setItem(NOTIFY_KEY, JSON.stringify({ ...settings, [unitId]: mode }));
 }
 
 function relativeTime(value) {
@@ -484,17 +487,21 @@ function App() {
   useEffect(() => {
     if (session?.role !== 'unit') return;
     if (!('Notification' in window)) return;
-    if (!notifySettingEnabled(session.unitId) || Notification.permission !== 'granted') return;
+    if (getNotifyMode(session.unitId) !== 'browser' || Notification.permission !== 'granted') return;
     unitMessages
       .filter((message) => !(message.seenBy || []).includes(session.unitId))
       .forEach((message) => {
         const marker = `${session.unitId}:${message.id}:${message.updatedAt || message.createdAt}`;
         if (notifiedMessages.current.has(marker)) return;
         notifiedMessages.current.add(marker);
-        new Notification(`Recado da Rosa para ${unitName(session.unitId)}`, {
-          body: message.title || message.text,
-          tag: marker
-        });
+        try {
+          new Notification(`Recado da Rosa para ${unitName(session.unitId)}`, {
+            body: message.title || message.text,
+            tag: marker
+          });
+        } catch {
+          setNotifySetting(session.unitId, 'in-app');
+        }
       });
   }, [session, unitMessages]);
 
@@ -811,18 +818,62 @@ function Topbar({ eyebrow, onLogout, syncMode, title }) {
 function UnitMessages({ messages, onReply, onSeen, unitId }) {
   const visible = messages.filter((message) => !(message.seenBy || []).includes(unitId));
   const [expanded, setExpanded] = useState(Boolean(visible.length));
-  const [notifyEnabled, setNotifyEnabled] = useState(() => notifySettingEnabled(unitId));
+  const [notifyMode, setNotifyMode] = useState(() => getNotifyMode(unitId));
+  const [notifyStatus, setNotifyStatus] = useState(() => {
+    const mode = getNotifyMode(unitId);
+    if (mode === 'browser') return 'Avisos do aparelho ligados para esta unidade.';
+    if (mode === 'in-app') return 'Avisos internos ligados para esta unidade.';
+    return '';
+  });
 
   async function toggleNotifications() {
-    if (!('Notification' in window)) return;
-    let allowed = Notification.permission === 'granted';
-    if (!allowed && Notification.permission !== 'denied') {
-      allowed = (await Notification.requestPermission()) === 'granted';
+    if (notifyMode) {
+      setNotifyMode('');
+      setNotifySetting(unitId, '');
+      setNotifyStatus('Avisos desligados para esta unidade.');
+      return;
     }
-    const next = allowed ? !notifyEnabled : false;
-    setNotifyEnabled(next);
-    setNotifySetting(unitId, next);
+
+    if (!('Notification' in window) || !window.isSecureContext) {
+      setNotifyMode('in-app');
+      setNotifySetting(unitId, 'in-app');
+      setNotifyStatus('Seu navegador não liberou aviso do aparelho. Deixei o aviso interno ligado.');
+      return;
+    }
+
+    try {
+      let allowed = Notification.permission === 'granted';
+      if (!allowed && Notification.permission !== 'denied') {
+        setNotifyStatus('Pedindo permissão ao navegador...');
+        const permission = await Promise.race([
+          Notification.requestPermission(),
+          new Promise((resolve) => {
+            setTimeout(() => resolve('timeout'), 1400);
+          })
+        ]);
+        allowed = permission === 'granted';
+      }
+
+      if (allowed) {
+        setNotifyMode('browser');
+        setNotifySetting(unitId, 'browser');
+        setNotifyStatus('Avisos do aparelho ligados para esta unidade.');
+        return;
+      }
+    } catch {
+      // Fall back to in-app notices below.
+    }
+
+    setNotifyMode('in-app');
+    setNotifySetting(unitId, 'in-app');
+    setNotifyStatus('O navegador bloqueou o aviso do aparelho. Deixei o aviso interno ligado.');
   }
+
+  const notifyLabel = notifyMode === 'browser'
+    ? 'Avisos do aparelho'
+    : notifyMode === 'in-app'
+      ? 'Avisos no app'
+      : 'Ativar avisos';
 
   return (
     <section className="message-band">
@@ -832,10 +883,11 @@ function UnitMessages({ messages, onReply, onSeen, unitId }) {
           Recados da Rosa
           {visible.length ? <b>{visible.length} novo(s)</b> : null}
         </button>
-        <button className={`ghost notify-button ${notifyEnabled ? 'active' : ''}`} onClick={toggleNotifications} type="button">
-          <Bell size={17} /> {notifyEnabled ? 'Avisos ligados' : 'Ativar avisos'}
+        <button className={`ghost notify-button ${notifyMode ? 'active' : ''}`} onClick={toggleNotifications} type="button">
+          <Bell size={17} /> {notifyLabel}
         </button>
       </div>
+      {notifyStatus ? <p className="notify-status">{notifyStatus}</p> : null}
       {expanded ? (
         <div className="message-list">
           {messages.length ? (
